@@ -1,0 +1,24 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+venv/
+.env
+.venv/
+
+# ===== 项目运行时目录（私有/产物，不入库） =====
+.codebuddy/
+.workbuddy/
+projects/
+output/
+*.log
+
+# ===== 编辑器 / OS =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

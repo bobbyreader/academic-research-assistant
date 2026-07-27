@@ -1,0 +1,72 @@
+# 全局设置
+
+# 项目路径
+paths:
+  projects_dir: "projects"
+  templates_dir: "templates"
+  output_dir: "output"
+  scripts_dir: "scripts"
+
+# API 配置（请替换为实际密钥）
+api_keys:
+  pubmed_email: ""  # 用于 PubMed API
+  semantic_scholar_key: ""  # Semantic Scholar API
+  scopus_key: ""  # Scopus API（可选）
+  elsevier_key: ""  # Elsevier API（可选，不要写入仓库）
+  crossref_email: ""  # CrossRef 礼貌池
+
+# 检索设置
+search:
+  default_databases: ["crossref", "pubmed", "arxiv", "semantic_scholar"]
+  max_results_per_source: 50
+  default_year_range: ["2019", "2024"]
+  deduplication_fields: ["doi", "title"]
+
+# 引用格式
+citation:
+  default_style: "nature"
+  supported_styles: ["nature", "apa", "ieee", "vancouver", "chicago"]
+  export_formats: ["ris", "bib", "nbib", "enw"]
+
+# 图表设置
+figures:
+  default_journal: "nature"
+  default_dpi: 300
+  default_format: "pdf"
+  color_palette: "okabe_ito"
+  font_family: "Arial"
+  font_size_pt: 7
+
+# 写作设置
+writing:
+  default_paper_type: "research_paper"
+  default_language: "en"
+  bilingual_abstract: true  # 中英文摘要
+  style_guide: "nature"
+
+# 审稿设置
+review:
+  reviewer_count: 3
+  include_devil_advocate: true
+  consensus_threshold: 2  # 至少几位 reviewer 提出才列为共识
+  score_scale: [0, 100]
+
+# 学术诚信
+integrity:
+  mandatory_stages: ["stage_2_5_integrity_pre", "stage_4_5_integrity_final"]
+  citation_verification: true
+  cross_model_check: false  # 需设置 ARS_CROSS_MODEL
+  temporal_validation: true
+
+# 导出设置
+export:
+  default_format: "md"
+  pdf_engine: "xelatex"
+  pptx_template: "default"
+  include_speaker_notes: true
+
+# 日志设置
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "workflow.log"

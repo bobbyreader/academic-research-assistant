@@ -1,0 +1,47 @@
+graph TD
+    brainstorming[brainstorming]:::checkpoint
+    academic_search[academic_search]
+    literature_review[literature_review]:::checkpoint
+    ars_deep_research[ars_deep_research<br/>ARS:deep_research]:::checkpoint
+    statistics[statistics]
+    visualization[visualization]
+    ars_academic_paper[ars_academic_paper<br/>ARS:academic_paper]:::checkpoint
+    polishing[polishing]
+    reviewer[reviewer]:::checkpoint
+    ars_pipeline_final[ars_pipeline_final<br/>ARS:pipeline_final]:::checkpoint
+    paper2ppt[paper2ppt]
+    brainstorming -->|research_topic| academic_search
+    academic_search -->|raw_literature| literature_review
+    academic_search -->|search_context| literature_review
+    literature_review -->|prior_knowledge| ars_deep_research
+    literature_review -->|research_gaps| ars_deep_research
+    brainstorming -->|research_questions| ars_deep_research
+    ars_deep_research -->|research_data| statistics
+    ars_deep_research -->|analysis_methods| statistics
+    statistics -->|chart_data| visualization
+    statistics -->|quality_annotations| visualization
+    ars_deep_research -->|literature_corpus| ars_academic_paper
+    ars_deep_research -->|knowledge_graph| ars_academic_paper
+    visualization -->|figures| ars_academic_paper
+    visualization -->|results_section_data| ars_academic_paper
+    ars_academic_paper -->|draft_paper| polishing
+    ars_academic_paper -->|citations| polishing
+    polishing -->|paper_under_review| reviewer
+    polishing -->|author_response_context| reviewer
+    ars_academic_paper -->|paper_draft| ars_pipeline_final
+    polishing -->|polished_paper| ars_pipeline_final
+    reviewer -->|external_review| ars_pipeline_final
+    reviewer -->|revision_tasks| ars_pipeline_final
+    ars_pipeline_final -->|final_paper| paper2ppt
+    ars_pipeline_final -->|quality_metrics| paper2ppt
+    user([用户输入])
+    user -->|research_area| brainstorming
+    user -->|constraints| brainstorming
+    user -->|search_scope| academic_search
+    user -->|visualization_config| visualization
+    user -->|target_venue| ars_academic_paper
+    user -->|target_journal| polishing
+    user -->|review_criteria| reviewer
+    user -->|presentation_config| paper2ppt
+
+    classDef checkpoint fill:#fff3cd,stroke:#ffc107,stroke-width:2px

@@ -1,0 +1,47 @@
+# 科研工作流系统依赖
+
+# 核心依赖
+pydantic>=2.0.0
+pyyaml>=6.0.1
+python-dateutil>=2.8.2
+
+# HTTP 请求（用于 API 调用）
+requests>=2.31.0
+httpx>=0.25.0
+
+# 数据处理
+pandas>=2.0.0
+numpy>=1.24.0
+
+# 文档处理
+markdown>=3.5.0
+python-docx>=1.1.0
+python-pptx>=0.6.23
+
+# PDF 生成
+reportlab>=4.0.0
+weasyprint>=60.0
+
+# 图表
+matplotlib>=3.8.0
+seaborn>=0.13.0
+plotly>=5.18.0
+
+# 学术 API
+biopython>=1.81  # PubMed/Entrez
+scholarly>=1.7.0  # Google Scholar（可选）
+pybliometrics>=3.5.0  # Scopus（可选）
+
+# 工具
+tqdm>=4.66.0
+rich>=13.0.0  # 美化终端输出
+click>=8.1.0  # CLI 框架（可选）
+
+# 测试
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# 开发工具（可选）
+black>=23.0.0
+ruff>=0.1.0
+mypy>=1.5.0

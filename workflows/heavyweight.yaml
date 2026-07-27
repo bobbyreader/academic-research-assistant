@@ -1,0 +1,298 @@
+# =============================================================================
+# 重量级科研工作流配置
+# =============================================================================
+# 适用场景：深度研究、系统性综述、高水平期刊论文
+# 特点：全面深入、多轮验证、严格质量控制、ARS 深度集成
+# =============================================================================
+
+workflow:
+  name: heavyweight
+  version: "1.0.0"
+  description: 重量级科研工作流，适用于深度研究和高水平学术论文
+  mode: heavyweight
+
+# ARS (Academic Research System) 特有配置
+ars_config:
+  # 学术诚信验证
+  integrity_check:
+    enabled: true
+    plagiarism_detection: true
+    citation_verification: true
+    data_fabrication_check: true
+
+  # Checkpoint 配置
+  checkpoint:
+    auto_save: true
+    save_interval: 300  # 秒
+    max_checkpoints: 10
+    compress: true
+
+  # 深度研究配置
+  deep_research:
+    max_iterations: 5
+    convergence_threshold: 0.85
+    enable_cross_validation: true
+
+# 阶段定义
+stages:
+  # ---------------------------------------------------------------------------
+  # 阶段 1: 头脑风暴
+  # ---------------------------------------------------------------------------
+  - name: brainstorming
+    skill_module: skills.brainstorming.skill.BrainstormingSkill
+    description: 研究主题探索、问题定义、假设生成
+    inputs:
+      research_area:
+        source: user_input
+        type: string
+        required: true
+        description: 研究领域或方向
+      constraints:
+        source: user_input
+        type: dict
+        required: false
+        description: 研究约束条件（时间、资源、方法等）
+    outputs:
+      - name: research_questions
+        type: list[string]
+        description: 生成的研究问题列表
+      - name: hypotheses
+        type: list[dict]
+        description: 研究假设及依据
+      - name: research_plan
+        type: dict
+        description: 初步研究计划
+    required: true
+    optional: false
+    timeout: 600
+    checkpoint: true  # 此阶段完成后保存 checkpoint
+
+  # ---------------------------------------------------------------------------
+  # 阶段 2: ARS 深度研究
+  # ---------------------------------------------------------------------------
+  - name: ars_deep_research
+    skill_module: skills.ars_integration.skill.ARSIntegrationSkill
+    description: ARS 深度文献调研和知识图谱构建
+    ars_stage_type: deep_research  # ARS 子阶段类型
+    inputs:
+      research_questions:
+        source: brainstorming.outputs.research_questions
+        type: list[string]
+        required: true
+      hypotheses:
+        source: brainstorming.outputs.hypotheses
+        type: list[dict]
+        required: false
+      research_plan:
+        source: brainstorming.outputs.research_plan
+        type: dict
+        required: false
+    outputs:
+      - name: literature_corpus
+        type: dict
+        description: 文献语料库（结构化存储）
+      - name: knowledge_graph
+        type: dict
+        description: 领域知识图谱
+      - name: research_gaps
+        type: list[dict]
+        description: 识别的研究空白
+      - name: methodology_suggestions
+        type: list[dict]
+        description: 建议的研究方法
+    required: true
+    optional: false
+    timeout: 3600  # 深度研究需要较长时间
+    checkpoint: true
+    retry_policy:
+      max_retries: 3
+      backoff_factor: 2
+
+  # ---------------------------------------------------------------------------
+  # 阶段 3: ARS 学术论文生成
+  # ---------------------------------------------------------------------------
+  - name: ars_academic_paper
+    skill_module: skills.ars_integration.skill.ARSIntegrationSkill
+    description: ARS 辅助学术论文撰写
+    ars_stage_type: academic_paper
+    inputs:
+      literature_corpus:
+        source: ars_deep_research.outputs.literature_corpus
+        type: dict
+        required: true
+      knowledge_graph:
+        source: ars_deep_research.outputs.knowledge_graph
+        type: dict
+        required: false
+      research_gaps:
+        source: ars_deep_research.outputs.research_gaps
+        type: list[dict]
+        required: false
+      methodology_suggestions:
+        source: ars_deep_research.outputs.methodology_suggestions
+        type: list[dict]
+        required: false
+      target_venue:
+        source: user_input
+        type: string
+        required: false
+        description: 目标发表 venue（期刊/会议）
+    outputs:
+      - name: paper_draft
+        type: string
+        description: 完整论文草稿
+      - name: supplementary_materials
+        type: dict
+        description: 补充材料（数据、代码、附录等）
+      - name: citation_network
+        type: dict
+        description: 引用网络分析
+    required: true
+    optional: false
+    timeout: 7200  # 论文撰写需要更长时间
+    checkpoint: true
+
+  # ---------------------------------------------------------------------------
+  # 阶段 4: ARS 审稿评估
+  # ---------------------------------------------------------------------------
+  - name: ars_reviewer
+    skill_module: skills.ars_integration.skill.ARSIntegrationSkill
+    description: ARS 多维度审稿和学术诚信验证
+    ars_stage_type: reviewer
+    inputs:
+      paper_draft:
+        source: ars_academic_paper.outputs.paper_draft
+        type: string
+        required: true
+      supplementary_materials:
+        source: ars_academic_paper.outputs.supplementary_materials
+        type: dict
+        required: false
+      citation_network:
+        source: ars_academic_paper.outputs.citation_network
+        type: dict
+        required: false
+    outputs:
+      - name: review_report
+        type: dict
+        description: 综合审稿报告
+      - name: integrity_report
+        type: dict
+        description: 学术诚信验证报告
+      - name: revision_priority_list
+        type: list[dict]
+        description: 按优先级排序的修改建议
+      - name: acceptance_probability
+        type: float
+        description: 预测录用概率
+    required: true
+    optional: false
+    timeout: 1800
+    checkpoint: true
+    # 学术诚信验证阶段标记
+    integrity_verification: true
+
+  # ---------------------------------------------------------------------------
+  # 阶段 5: ARS 全流程整合
+  # ---------------------------------------------------------------------------
+  - name: ars_pipeline
+    skill_module: skills.ars_integration.skill.ARSIntegrationSkill
+    description: ARS 全流程整合与优化
+    ars_stage_type: pipeline
+    inputs:
+      paper_draft:
+        source: ars_academic_paper.outputs.paper_draft
+        type: string
+        required: true
+      review_report:
+        source: ars_reviewer.outputs.review_report
+        type: dict
+        required: true
+      integrity_report:
+        source: ars_reviewer.outputs.integrity_report
+        type: dict
+        required: true
+      revision_priority_list:
+        source: ars_reviewer.outputs.revision_priority_list
+        type: list[dict]
+        required: true
+    outputs:
+      - name: final_paper
+        type: string
+        description: 最终版论文
+      - name: revision_history
+        type: list[dict]
+        description: 完整修改历史
+      - name: quality_metrics
+        type: dict
+        description: 最终质量指标
+      - name: submission_package
+        type: dict
+        description: 投稿材料包
+    required: true
+    optional: false
+    timeout: 3600
+    checkpoint: true
+
+  # ---------------------------------------------------------------------------
+  # 阶段 6: PPT 生成
+  # ---------------------------------------------------------------------------
+  - name: paper2ppt
+    skill_module: skills.paper2ppt.skill.Paper2PPTSkill
+    description: 将最终论文转换为演示文稿
+    inputs:
+      final_paper:
+        source: ars_pipeline.outputs.final_paper
+        type: string
+        required: true
+      quality_metrics:
+        source: ars_pipeline.outputs.quality_metrics
+        type: dict
+        required: false
+      presentation_config:
+        source: user_input
+        type: dict
+        required: false
+        default:
+          slide_count: 25
+          style: "academic"
+          include_appendix: true
+    outputs:
+      - name: presentation
+        type: string
+        description: PPT 文件路径
+      - name: slide_outline
+        type: list[dict]
+        description: 幻灯片大纲
+      - name: speaker_notes
+        type: string
+        description: 演讲者备注
+    required: true
+    optional: false
+    timeout: 900
+
+# 全局配置
+config:
+  # 产出物版本管理
+  artifact_versioning: true
+  max_versions_per_artifact: 10  # 重量级保留更多版本
+
+  # 错误处理
+  on_stage_failure: "retry"  # stop | continue | retry
+  max_retries: 3
+
+  # 日志级别
+  log_level: "DEBUG"  # 重量级使用更详细日志
+
+  # 输出目录结构
+  output_structure:
+    artifacts: "artifacts/{stage_name}/"
+    checkpoints: "checkpoints/"
+    exports: "exports/"
+    ars_cache: "ars_cache/"  # ARS 特有缓存目录
+
+  # 通知配置
+  notifications:
+    on_stage_complete: true
+    on_checkpoint_save: true
+    on_error: true

@@ -1,0 +1,514 @@
+# =============================================================================
+# 混合型科研工作流配置（推荐）
+# =============================================================================
+# 适用场景：大多数科研项目，平衡效率与深度
+# 特点：灵活组合轻量级和重量级阶段、数据映射转换、智能路由
+# =============================================================================
+
+workflow:
+  name: hybrid
+  version: "1.0.0"
+  description: 混合型科研工作流，平衡效率与深度，适用于大多数科研项目
+  mode: hybrid
+
+# 数据映射和转换规则
+# 定义阶段间数据如何转换和适配
+data_mappings:
+  # 头脑风暴 -> 学术搜索
+  brainstorming_to_search:
+    source_stage: brainstorming
+    target_stage: academic_search
+    mappings:
+      - source_field: research_questions[0]  # 取第一个研究问题
+        target_field: research_topic
+        transform: "extract_keywords"  # 转换函数：提取关键词
+      - source_field: hypotheses
+        target_field: search_context
+        transform: "format_hypotheses"
+
+  # 学术搜索 -> 文献综述
+  search_to_review:
+    source_stage: academic_search
+    target_stage: literature_review
+    mappings:
+      - source_field: search_results
+        target_field: raw_literature
+        transform: "filter_by_relevance"
+        params:
+          threshold: 0.7
+      - source_field: search_metadata
+        target_field: search_context
+
+  # 文献综述 -> ARS 深度研究
+  review_to_ars:
+    source_stage: literature_review
+    target_stage: ars_deep_research
+    mappings:
+      - source_field: synthesized_knowledge
+        target_field: prior_knowledge
+        transform: "to_knowledge_graph"
+      - source_field: identified_gaps
+        target_field: research_gaps
+        transform: "merge_with_existing"
+
+  # ARS 深度研究 -> 统计分析
+  ars_to_statistics:
+    source_stage: ars_deep_research
+    target_stage: statistics
+    mappings:
+      - source_field: literature_corpus
+        target_field: research_data
+        transform: "extract_quantitative_data"
+      - source_field: methodology_suggestions
+        target_field: analysis_methods
+        transform: "parse_methods"
+
+  # 统计分析 -> 可视化
+  statistics_to_visualization:
+    source_stage: statistics
+    target_stage: visualization
+    mappings:
+      - source_field: statistical_summary
+        target_field: chart_data
+        transform: "prepare_chart_data"
+      - source_field: data_quality_report
+        target_field: quality_annotations
+
+  # 可视化 -> ARS 论文生成
+  visualization_to_ars_paper:
+    source_stage: visualization
+    target_stage: ars_academic_paper
+    mappings:
+      - source_field: charts
+        target_field: figures
+        transform: "embed_figures"
+      - source_field: visualization_report
+        target_field: results_section_data
+
+  # ARS 论文 -> 润色
+  ars_paper_to_polishing:
+    source_stage: ars_academic_paper
+    target_stage: polishing
+    mappings:
+      - source_field: paper_draft
+        target_field: draft_paper
+        transform: "extract_main_text"
+      - source_field: citation_network
+        target_field: citations
+        transform: "format_citations"
+
+  # 润色 -> 审稿
+  polishing_to_reviewer:
+    source_stage: polishing
+    target_stage: reviewer
+    mappings:
+      - source_field: polished_paper
+        target_field: paper_under_review
+      - source_field: revision_notes
+        target_field: author_response_context
+
+  # 审稿 -> ARS 最终整合
+  reviewer_to_ars_final:
+    source_stage: reviewer
+    target_stage: ars_pipeline_final
+    mappings:
+      - source_field: review_report
+        target_field: external_review
+        transform: "parse_review_comments"
+      - source_field: revision_suggestions
+        target_field: revision_tasks
+        transform: "prioritize_tasks"
+
+# 阶段定义
+stages:
+  # ---------------------------------------------------------------------------
+  # 阶段 1: 头脑风暴
+  # ---------------------------------------------------------------------------
+  - name: brainstorming
+    skill_module: skills.brainstorming.skill.BrainstormingSkill
+    description: 研究主题探索、问题定义、假设生成
+    inputs:
+      research_area:
+        source: user_input
+        type: string
+        required: true
+      constraints:
+        source: user_input
+        type: dict
+        required: false
+    outputs:
+      - name: research_questions
+        type: list[string]
+      - name: hypotheses
+        type: list[dict]
+      - name: research_plan
+        type: dict
+    required: true
+    optional: false
+    timeout: 600
+    checkpoint: true
+
+  # ---------------------------------------------------------------------------
+  # 阶段 2: 学术搜索（轻量级）
+  # ---------------------------------------------------------------------------
+  - name: academic_search
+    skill_module: skills.academic_search.skill.AcademicSearchSkill
+    description: 快速学术文献检索
+    inputs:
+      research_topic:
+        source: brainstorming.outputs.research_questions
+        type: string
+        required: true
+        transform: "extract_keywords"  # 应用数据转换
+      search_scope:
+        source: user_input
+        type: string
+        required: false
+        default: "comprehensive"
+    outputs:
+      - name: search_results
+        type: list[dict]
+      - name: search_metadata
+        type: dict
+    required: true
+    optional: false
+    timeout: 300
+
+  # ---------------------------------------------------------------------------
+  # 阶段 3: 文献综述（轻量级）
+  # ---------------------------------------------------------------------------
+  - name: literature_review
+    skill_module: skills.literature_review.skill.LiteratureReviewSkill
+    description: 文献综合分析和知识提取
+    inputs:
+      raw_literature:
+        source: academic_search.outputs.search_results
+        type: list[dict]
+        required: true
+        transform: "filter_by_relevance"
+      search_context:
+        source: academic_search.outputs.search_metadata
+        type: dict
+        required: false
+    outputs:
+      - name: synthesized_knowledge
+        type: dict
+        description: 综合后的领域知识
+      - name: identified_gaps
+        type: list[dict]
+        description: 识别的研究空白
+      - name: literature_matrix
+        type: dict
+        description: 文献对比矩阵
+    required: true
+    optional: false
+    timeout: 900
+    checkpoint: true
+
+  # ---------------------------------------------------------------------------
+  # 阶段 4: ARS 深度研究（重量级）
+  # ---------------------------------------------------------------------------
+  - name: ars_deep_research
+    skill_module: skills.ars_integration.skill.ARSIntegrationSkill
+    description: ARS 深度研究和知识图谱扩展
+    ars_stage_type: deep_research
+    inputs:
+      prior_knowledge:
+        source: literature_review.outputs.synthesized_knowledge
+        type: dict
+        required: true
+        transform: "to_knowledge_graph"
+      research_gaps:
+        source: literature_review.outputs.identified_gaps
+        type: list[dict]
+        required: false
+        transform: "merge_with_existing"
+      research_questions:
+        source: brainstorming.outputs.research_questions
+        type: list[string]
+        required: true
+    outputs:
+      - name: literature_corpus
+        type: dict
+      - name: knowledge_graph
+        type: dict
+      - name: research_gaps
+        type: list[dict]
+      - name: methodology_suggestions
+        type: list[dict]
+    required: true
+    optional: false
+    timeout: 3600
+    checkpoint: true
+
+  # ---------------------------------------------------------------------------
+  # 阶段 5: 统计分析（轻量级）
+  # ---------------------------------------------------------------------------
+  - name: statistics
+    skill_module: skills.statistics.skill.StatisticsSkill
+    description: 数据统计分析和质量评估
+    inputs:
+      research_data:
+        source: ars_deep_research.outputs.literature_corpus
+        type: dict
+        required: true
+        transform: "extract_quantitative_data"
+      analysis_methods:
+        source: ars_deep_research.outputs.methodology_suggestions
+        type: list[dict]
+        required: false
+        transform: "parse_methods"
+    outputs:
+      - name: statistical_summary
+        type: dict
+      - name: data_quality_report
+        type: dict
+    required: true
+    optional: false
+    timeout: 600
+
+  # ---------------------------------------------------------------------------
+  # 阶段 6: 可视化（轻量级）
+  # ---------------------------------------------------------------------------
+  - name: visualization
+    skill_module: skills.visualization.skill.VisualizationSkill
+    description: 数据可视化图表生成
+    inputs:
+      chart_data:
+        source: statistics.outputs.statistical_summary
+        type: dict
+        required: true
+        transform: "prepare_chart_data"
+      quality_annotations:
+        source: statistics.outputs.data_quality_report
+        type: dict
+        required: false
+      visualization_config:
+        source: user_input
+        type: dict
+        required: false
+        default:
+          chart_types: ["bar", "line", "pie", "network"]
+          style: "academic"
+    outputs:
+      - name: charts
+        type: list[dict]
+      - name: visualization_report
+        type: dict
+    required: true
+    optional: false
+    timeout: 300
+
+  # ---------------------------------------------------------------------------
+  # 阶段 7: ARS 学术论文生成（重量级）
+  # ---------------------------------------------------------------------------
+  - name: ars_academic_paper
+    skill_module: skills.ars_integration.skill.ARSIntegrationSkill
+    description: ARS 辅助学术论文撰写
+    ars_stage_type: academic_paper
+    inputs:
+      literature_corpus:
+        source: ars_deep_research.outputs.literature_corpus
+        type: dict
+        required: true
+      knowledge_graph:
+        source: ars_deep_research.outputs.knowledge_graph
+        type: dict
+        required: false
+      figures:
+        source: visualization.outputs.charts
+        type: list[dict]
+        required: false
+        transform: "embed_figures"
+      results_section_data:
+        source: visualization.outputs.visualization_report
+        type: dict
+        required: false
+      target_venue:
+        source: user_input
+        type: string
+        required: false
+    outputs:
+      - name: paper_draft
+        type: string
+      - name: supplementary_materials
+        type: dict
+      - name: citation_network
+        type: dict
+    required: true
+    optional: false
+    timeout: 7200
+    checkpoint: true
+
+  # ---------------------------------------------------------------------------
+  # 阶段 8: 润色优化（轻量级）
+  # ---------------------------------------------------------------------------
+  - name: polishing
+    skill_module: skills.polishing.skill.PolishingSkill
+    description: 论文语言润色和格式优化
+    inputs:
+      draft_paper:
+        source: ars_academic_paper.outputs.paper_draft
+        type: string
+        required: true
+        transform: "extract_main_text"
+      citations:
+        source: ars_academic_paper.outputs.citation_network
+        type: dict
+        required: false
+        transform: "format_citations"
+      target_journal:
+        source: user_input
+        type: string
+        required: false
+    outputs:
+      - name: polished_paper
+        type: string
+      - name: revision_notes
+        type: list[string]
+    required: true
+    optional: false
+    timeout: 600
+
+  # ---------------------------------------------------------------------------
+  # 阶段 9: 审稿评估（轻量级）
+  # ---------------------------------------------------------------------------
+  - name: reviewer
+    skill_module: skills.reviewer.skill.ReviewerSkill
+    description: 模拟同行评审
+    inputs:
+      paper_under_review:
+        source: polishing.outputs.polished_paper
+        type: string
+        required: true
+      author_response_context:
+        source: polishing.outputs.revision_notes
+        type: list[string]
+        required: false
+      review_criteria:
+        source: user_input
+        type: list[string]
+        required: false
+        default: ["novelty", "methodology", "clarity", "significance"]
+    outputs:
+      - name: review_report
+        type: dict
+      - name: revision_suggestions
+        type: list[dict]
+      - name: quality_score
+        type: float
+    required: true
+    optional: false
+    timeout: 600
+    checkpoint: true
+
+  # ---------------------------------------------------------------------------
+  # 阶段 10: ARS 最终整合（重量级）
+  # ---------------------------------------------------------------------------
+  - name: ars_pipeline_final
+    skill_module: skills.ars_integration.skill.ARSIntegrationSkill
+    description: ARS 最终整合、学术诚信验证和投稿准备
+    ars_stage_type: pipeline_final
+    inputs:
+      paper_draft:
+        source: ars_academic_paper.outputs.paper_draft
+        type: string
+        required: true
+      polished_paper:
+        source: polishing.outputs.polished_paper
+        type: string
+        required: true
+      external_review:
+        source: reviewer.outputs.review_report
+        type: dict
+        required: true
+        transform: "parse_review_comments"
+      revision_tasks:
+        source: reviewer.outputs.revision_suggestions
+        type: list[dict]
+        required: true
+        transform: "prioritize_tasks"
+    outputs:
+      - name: final_paper
+        type: string
+      - name: revision_history
+        type: list[dict]
+      - name: quality_metrics
+        type: dict
+      - name: submission_package
+        type: dict
+      - name: integrity_certificate
+        type: dict
+        description: 学术诚信验证证书
+    required: true
+    optional: false
+    timeout: 3600
+    checkpoint: true
+    integrity_verification: true
+
+  # ---------------------------------------------------------------------------
+  # 阶段 11: PPT 生成
+  # ---------------------------------------------------------------------------
+  - name: paper2ppt
+    skill_module: skills.paper2ppt.skill.Paper2PPTSkill
+    description: 将最终论文转换为演示文稿
+    inputs:
+      final_paper:
+        source: ars_pipeline_final.outputs.final_paper
+        type: string
+        required: true
+      quality_metrics:
+        source: ars_pipeline_final.outputs.quality_metrics
+        type: dict
+        required: false
+      presentation_config:
+        source: user_input
+        type: dict
+        required: false
+        default:
+          slide_count: 20
+          style: "academic"
+    outputs:
+      - name: presentation
+        type: string
+      - name: slide_outline
+        type: list[dict]
+      - name: speaker_notes
+        type: string
+    required: true
+    optional: false
+    timeout: 600
+
+# 全局配置
+config:
+  # 产出物版本管理
+  artifact_versioning: true
+  max_versions_per_artifact: 7
+
+  # 错误处理
+  on_stage_failure: "retry"
+  max_retries: 2
+
+  # 日志级别
+  log_level: "INFO"
+
+  # 输出目录结构
+  output_structure:
+    artifacts: "artifacts/{stage_name}/"
+    checkpoints: "checkpoints/"
+    exports: "exports/"
+    ars_cache: "ars_cache/"
+    mappings_cache: "mappings_cache/"  # 数据映射缓存
+
+  # 数据转换配置
+  transform:
+    cache_enabled: true
+    validate_outputs: true
+    strict_mode: false  # 严格模式下转换失败会停止工作流
+
+  # 通知配置
+  notifications:
+    on_stage_complete: true
+    on_checkpoint_save: false
+    on_error: true
+    on_transform_applied: true
