@@ -96,42 +96,22 @@ def demo_writing() -> None:
 
     skill = WritingSkill()
     result = skill.execute({
-        "action": "draft",
-        "section": "abstract",
-        "claims": [
-            {
-                "text": "AI 驱动的质量保障系统显著提升评估效率",
-                "figures": ["fig1"],
-                "citations": ["ref1", "ref2"],
-                "confidence": "high",
-            },
-            {
-                "text": "机器学习算法可准确预测学生学业风险",
-                "figures": ["fig2", "fig3"],
-                "citations": ["ref3"],
-                "confidence": "medium",
-            },
-        ],
-        "figures": [
-            {"id": "fig1", "caption": "效率对比分析"},
-            {"id": "fig2", "caption": "预测模型性能"},
-            {"id": "fig3", "caption": "风险因素重要性"},
-        ],
-        "paper_type": "research_paper",
+        "task": "abstract",
+        "subtask": "structured",
+        "payload": {
+            "research_topic": "AI 对高等教育质量保障的影响",
+            "key_findings": ["效率提升 40%", "风险预测准确率 92%"],
+        },
     })
 
     print(f"状态: {result.status.value}")
-    print(f"章节: {result.data['section']}")
-    print(f"叙事结构: {' → '.join(result.data['narrative_structure'])}")
-    print(f"\nClaim-Evidence 映射 ({len(result.data['claim_evidence_map'])} 条):")
-    for i, cm in enumerate(result.data["claim_evidence_map"], 1):
-        print(f"  Claim {i}: {cm['claim']}")
-        print(f"    证据图表: {cm['evidence_figures']} | 引用: {cm['citations']} | 置信度: {cm['confidence']}")
-
-    if result.data["missing_info"]:
-        print(f"\n缺失信息:")
-        for item in result.data["missing_info"]:
-            print(f"  - {item}")
+    print(f"任务: {result.data.get('task', 'N/A')}")
+    print(f"子任务: {result.data.get('subtask', 'N/A')}")
+    if "abstract" in result.data:
+        abstract = result.data["abstract"]
+        print(f"\n摘要结构: {abstract.get('structure', 'N/A')}")
+        print(f"字数估计: {abstract.get('word_count', 'N/A')}")
+    print(f"\n作者检查项: {result.author_checks}")
 
 
 def demo_polishing() -> None:
@@ -142,18 +122,21 @@ def demo_polishing() -> None:
 
     skill = PolishingSkill()
     result = skill.execute({
-        "action": "ai_flavor_check",
-        "text": "This revolutionary study demonstrates that AI leads to unprecedented improvements in education quality. It is widely known that recent advances have proven the game-changing potential of this paradigm shift.",
+        "task": "ai_detection",
+        "subtask": "ai_tells_check",
+        "payload": {
+            "text": "This revolutionary study demonstrates that AI leads to unprecedented improvements in education quality. It is widely known that recent advances have proven the game-changing potential of this paradigm shift.",
+        },
     })
 
     print(f"状态: {result.status.value}")
-    print(f"AI 味评分: {result.data['overall_ai_flavor_score']:.1f}%")
-    print(f"\n检测到 {len(result.data['ai_flavor_issues'])} 处问题:")
-    for issue in result.data["ai_flavor_issues"]:
-        print(f"  [{issue['severity']}] {issue['issue_type']}")
-        print(f"    匹配: '{issue['matched_text']}'")
-        print(f"    建议: {issue['suggestion']}")
-        print()
+    print(f"任务: {result.data.get('task', 'N/A')}")
+    print(f"子任务: {result.data.get('subtask', 'N/A')}")
+    if "ai_detection_result" in result.data:
+        print("检测到 AI 味问题")
+    if result.errors:
+        print(f"错误: {result.errors}")
+    print(f"作者检查项: {result.author_checks}")
 
 
 def demo_reviewer() -> None:
@@ -164,14 +147,22 @@ def demo_reviewer() -> None:
 
     skill = ReviewerSkill()
     result = skill.execute({
-        "action": "quick_review",
-        "manuscript_text": "[手稿内容...]",
-        "focus_areas": ["technical_soundness", "originality"],
+        "task": "nature_criteria",
+        "subtask": "originality",
+        "payload": {
+            "manuscript": "[手稿内容：本研究提出了一种基于 AI 的高等教育质量保障新方法...]",
+        },
     })
 
     print(f"状态: {result.status.value}")
-    print(f"总体印象: {result.data['overall_impression']}")
-    print(f"推荐意见: {result.data['recommendation']}")
+    print(f"任务: {result.data.get('task', 'N/A')}")
+    print(f"评估维度: {result.data.get('dimension', 'N/A')}")
+    if "assessment" in result.data:
+        assessment = result.data["assessment"]
+        print(f"评级: {assessment.get('rating', 'N/A')}")
+    if result.errors:
+        print(f"错误: {result.errors}")
+    print(f"作者检查项: {result.author_checks}")
 
 
 def main() -> None:

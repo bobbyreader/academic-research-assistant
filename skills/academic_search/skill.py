@@ -1,329 +1,301 @@
-"""
-Academic search skill module for multi-source literature retrieval.
+"""学术检索技能模块。
 
-Supports querying CrossRef, PubMed, arXiv, Scopus, and ScienceDirect with
-deduplication, citation formatting (APA/Nature/IEEE/Vancouver), strict
-citation auditing, and high-impact citation analysis.
+提供多源学术检索、文献元数据核查、引用格式生成、
+严格他引审计和高影响力引用者分析。
 """
 
 from __future__ import annotations
 
-import hashlib
-import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from enum import Enum
+from typing import Any
 
-from core.base_skill import BaseSkill, SkillContext, SkillResult
-from core.skill_bridge import Citation
-from core.state_manager import WorkflowStage
+from core.skill_bridge import BaseSkill, SkillOutput, SkillStatus
 
-from .prompts import CITATION_FORMAT_PROMPTS, EXPORT_FORMAT_PROMPTS
+
+class CitationFormat(Enum):
+    """支持的引用格式。"""
+
+    NATURE = "nature"
+    APA = "apa"
+    IEEE = "ieee"
+    VANCOUVER = "vancouver"
+    CHICAGO = "chicago"
+
+
+class SearchSource(Enum):
+    """支持的检索来源。"""
+
+    CROSSREF = "crossref"
+    PUBMED = "pubmed"
+    ARXIV = "arxiv"
+    SCOPUS = "scopus"
+    SCIENCEDIRECT = "sciencedirect"
+    SEMANTIC_SCHOLAR = "semantic_scholar"
 
 
 @dataclass
-class AcademicSearchInput:
-    """Input data for academic search skill."""
+class PaperMetadata:
+    """论文元数据。"""
 
-    query: str
-    databases: List[str] = field(default_factory=lambda: ["crossref"])
-    citation_style: str = "APA"
-    export_format: str = "RIS"
-    audit_citations: bool = False
-    max_results: int = 50
+    title: str = ""
+    authors: list[str] = field(default_factory=list)
+    year: int | None = None
+    journal: str = ""
+    doi: str = ""
+    pmid: str = ""
+    arxiv_id: str = ""
+    abstract: str = ""
+    source: str = ""
 
 
 @dataclass
 class CitationAuditResult:
-    """Result of strict citation independence audit."""
+    """他引审计结果。"""
 
     total_citations: int = 0
-    independent_citations: int = 0
     self_citations: int = 0
-    coauthor_citations: int = 0
-    institutional_citations: int = 0
+    team_citations: int = 0
     network_citations: int = 0
-    flagged_for_review: List[str] = field(default_factory=list)
+    strict_external_citations: int = 0
+    high_impact_citers: list[dict[str, Any]] = field(default_factory=list)
+    uncertain_cases: list[str] = field(default_factory=list)
 
 
-@dataclass
-class AcademicSearchOutput:
-    """Output data from academic search skill."""
+class AcademicSearchSkill(BaseSkill):
+    """学术检索技能。
 
-    references: List[Citation] = field(default_factory=list)
-    formatted_citations: List[str] = field(default_factory=list)
-    export_content: str = ""
-    export_format: str = "RIS"
-    raw_results_count: int = 0
-    deduplicated_count: int = 0
-    citation_audit: Optional[CitationAuditResult] = None
-    high_impact_analysis: Dict[str, Any] = field(default_factory=dict)
-
-
-class AcademicSearchSkill(BaseSkill[AcademicSearchInput, AcademicSearchOutput]):
-    """Multi-source academic search and citation management skill.
-
-    Retrieves literature from major databases, deduplicates results,
-    formats citations in multiple styles, and performs strict citation
-    independence audits to identify genuine scholarly impact.
+    支持多源检索、引用格式生成、严格他引审计。
     """
 
-    SUPPORTED_DATABASES = ["crossref", "pubmed", "arxiv", "scopus", "sciencedirect"]
-    SUPPORTED_CITATION_STYLES = list(CITATION_FORMAT_PROMPTS.keys())
-    SUPPORTED_EXPORT_FORMATS = list(EXPORT_FORMAT_PROMPTS.keys()) + ["NBIB", "ENW"]
+    name: str = "academic_search"
+    version: str = "1.0.0"
+    description: str = "多源学术检索、引用格式生成、严格他引审计"
 
-    def __init__(self, context: SkillContext) -> None:
-        super().__init__(context)
-        databases = self.context.config.get("databases", [])
-        for db in databases:
-            if db not in self.SUPPORTED_DATABASES:
-                raise ValueError(
-                    f"Unsupported database '{db}'. "
-                    f"Supported: {self.SUPPORTED_DATABASES}"
-                )
+    SUPPORTED_FORMATS = [f.value for f in CitationFormat]
+    SUPPORTED_SOURCES = [s.value for s in SearchSource]
 
-    @property
-    def name(self) -> str:
-        return "academic_search"
-
-    @property
-    def stage(self) -> WorkflowStage:
-        return WorkflowStage.SEARCH
-
-    def execute(self, input_data: AcademicSearchInput) -> SkillResult:
-        """Execute academic search workflow.
+    def execute(self, input_data: dict[str, Any]) -> SkillOutput:
+        """执行学术检索任务。
 
         Args:
-            input_data: AcademicSearchInput containing query, databases,
-                citation style, export format, and audit options.
+            input_data: 包含以下键的字典：
+                - action: 操作类型 (search/verify/audit/format)
+                - query: 检索查询（search 时必填）
+                - doi/pmid/arxiv_id: 文献标识（verify/audit/format 时必填）
+                - sources: 检索来源列表（可选）
+                - format: 引用格式（format 时必填）
+                - exclude_rules: 他引排除规则（audit 时可选）
 
         Returns:
-            SkillResult with AcademicSearchOutput containing references,
-            formatted citations, export content, and audit results.
+            SkillOutput 包含检索/验证/审计/格式化结果。
         """
-        try:
-            # Multi-source search
-            all_results = self._search_databases(
-                input_data.query, input_data.databases, input_data.max_results
+        action = input_data.get("action", "")
+
+        handlers = {
+            "search": self._handle_search,
+            "verify": self._handle_verify,
+            "audit": self._handle_audit,
+            "format": self._handle_format,
+        }
+
+        handler = handlers.get(action)
+        if handler is None:
+            output = self._create_output()
+            output.add_error(
+                f"未知操作: {action}。支持的操作: {list(handlers.keys())}"
             )
+            return output
 
-            # Deduplication
-            deduplicated = self._deduplicate(all_results)
+        return handler(input_data)
 
-            # Citation formatting
-            formatted = self._format_citations(deduplicated, input_data.citation_style)
+    def _handle_search(self, input_data: dict[str, Any]) -> SkillOutput:
+        """处理文献检索。"""
+        output = self._create_output()
 
-            # Export generation
-            export_content = self._generate_export(deduplicated, input_data.export_format)
+        query = input_data.get("query", "")
+        if not query:
+            output.add_error("缺少检索查询 (query)")
+            return output
 
-            # Citation audit (if requested)
-            audit_result = None
-            if input_data.audit_citations:
-                audit_result = self._audit_citations(deduplicated)
+        sources = input_data.get("sources", ["crossref", "pubmed"])
+        max_results = input_data.get("max_results", 20)
+        year_range = input_data.get("year_range")
 
-            # High-impact analysis
-            high_impact = self._analyze_high_impact(deduplicated)
+        # 构建检索策略说明
+        strategy = {
+            "query": query,
+            "sources": sources,
+            "max_results_per_source": max_results,
+            "year_range": year_range,
+            "databases_note": "二级索引仅作发现线索，关键字段需回源核实",
+        }
 
-            output = AcademicSearchOutput(
-                references=deduplicated,
-                formatted_citations=formatted,
-                export_content=export_content,
-                export_format=input_data.export_format,
-                raw_results_count=len(all_results),
-                deduplicated_count=len(deduplicated),
-                citation_audit=audit_result,
-                high_impact_analysis=high_impact,
+        # 模拟检索结果（实际应调用各 API）
+        results = self._simulate_search(query, sources, max_results)
+
+        output.data = {
+            "strategy": strategy,
+            "results": results,
+            "result_count": len(results),
+            "deduplication_note": "按 DOI 去重，无 DOI 按标题模糊匹配",
+            "unverified_items": [r["doi"] for r in results if not r.get("verified")],
+        }
+
+        if any(not r.get("verified") for r in results):
+            output.add_warning("部分文献元数据未验证，建议回源核实")
+
+        return output
+
+    def _handle_verify(self, input_data: dict[str, Any]) -> SkillOutput:
+        """处理文献元数据验证。"""
+        output = self._create_output()
+
+        doi = input_data.get("doi", "")
+        pmid = input_data.get("pmid", "")
+        arxiv_id = input_data.get("arxiv_id", "")
+
+        if not any([doi, pmid, arxiv_id]):
+            output.add_error("至少需要一个文献标识: doi, pmid, 或 arxiv_id")
+            return output
+
+        # 模拟验证结果
+        verified = {
+            "doi": doi,
+            "pmid": pmid,
+            "arxiv_id": arxiv_id,
+            "verified": True,
+            "metadata": {
+                "title": "[待获取]",
+                "authors": ["[待获取]"],
+                "journal": "[待获取]",
+                "year": None,
+            },
+            "verification_source": "crossref" if doi else "pubmed" if pmid else "arxiv",
+        }
+
+        output.data = verified
+        output.add_author_check("请核对自动获取的元数据是否与原文一致")
+
+        return output
+
+    def _handle_audit(self, input_data: dict[str, Any]) -> SkillOutput:
+        """处理严格他引审计。"""
+        output = self._create_output()
+
+        target_doi = input_data.get("doi", "")
+        if not target_doi:
+            output.add_error("缺少目标文献 DOI")
+            return output
+
+        exclude_rules = input_data.get("exclude_rules", {
+            "exclude_self": True,
+            "exclude_team": True,
+            "exclude_network": True,
+            "same_institution": True,
+        })
+
+        # 模拟审计结果
+        audit_result = CitationAuditResult(
+            total_citations=0,
+            self_citations=0,
+            team_citations=0,
+            network_citations=0,
+            strict_external_citations=0,
+            high_impact_citers=[],
+            uncertain_cases=["缺少作者/机构信息，无法完全排除合作网络引用"],
+        )
+
+        output.data = {
+            "target_doi": target_doi,
+            "exclude_rules": exclude_rules,
+            "audit_result": {
+                "total_citations": audit_result.total_citations,
+                "self_citations": audit_result.self_citations,
+                "team_citations": audit_result.team_citations,
+                "network_citations": audit_result.network_citations,
+                "strict_external_citations": audit_result.strict_external_citations,
+            },
+            "high_impact_citers": audit_result.high_impact_citers,
+            "uncertain_cases": audit_result.uncertain_cases,
+            "note": "严格他引判断需要明确排除规则；不确定情况已标注",
+        }
+
+        output.add_warning("他引审计为保守估计，建议人工复核边界情况")
+        return output
+
+    def _handle_format(self, input_data: dict[str, Any]) -> SkillOutput:
+        """处理引用格式生成。"""
+        output = self._create_output()
+
+        papers = input_data.get("papers", [])
+        format_style = input_data.get("format", "nature")
+
+        if not papers:
+            output.add_error("缺少文献列表 (papers)")
+            return output
+
+        if format_style not in self.SUPPORTED_FORMATS:
+            output.add_error(
+                f"不支持的引用格式: {format_style}。"
+                f"支持: {self.SUPPORTED_FORMATS}"
             )
-
-            # Save artifacts
-            self.save_artifact(
-                name="references",
-                content=export_content,
-                ext=f".{input_data.export_format.lower()}",
-                metadata={"query": input_data.query, "databases": input_data.databases},
-            )
-            self.save_artifact(
-                name="formatted_citations",
-                content="\n".join(formatted),
-                ext=".txt",
-                metadata={"style": input_data.citation_style},
-            )
-
-            return SkillResult(success=True, data=output)
-
-        except Exception as exc:
-            return SkillResult(success=False, error_message=str(exc))
-
-    def _search_databases(
-        self, query: str, databases: List[str], max_results: int
-    ) -> List[Citation]:
-        """Search across multiple academic databases."""
-        results: List[Citation] = []
-        for db in databases:
-            if db not in self.SUPPORTED_DATABASES:
-                continue
-            db_results = self._mock_search(db, query, max_results)
-            results.extend(db_results)
-        return results
-
-    def _mock_search(self, database: str, query: str, max_results: int) -> List[Citation]:
-        """Mock database search for demonstration."""
-        return [
-            Citation(
-                id=f"{database}_{i}",
-                title=f"Sample paper {i} on {query}",
-                authors=[f"Author {i}A", f"Author {i}B"],
-                year=2020 + (i % 5),
-                journal=f"Journal of {database.title()}",
-                doi=f"10.1000/{database}.{i}",
-                raw_data={"source": database},
-            )
-            for i in range(min(max_results, 10))
-        ]
-
-    def _deduplicate(self, references: List[Citation]) -> List[Citation]:
-        """Remove duplicate references using fingerprint matching."""
-        seen: Set[str] = set()
-        unique: List[Citation] = []
-        for ref in references:
-            fp = self._fingerprint(ref)
-            if fp not in seen:
-                seen.add(fp)
-                unique.append(ref)
-        return unique
-
-    def _fingerprint(self, ref: Citation) -> str:
-        """Generate deduplication fingerprint."""
-        key = f"{ref.title.lower().strip()}|{ref.authors[0].lower() if ref.authors else ''}|{ref.year or ''}"
-        return hashlib.md5(key.encode()).hexdigest()
-
-    def _format_citations(
-        self, references: List[Citation], style: str
-    ) -> List[str]:
-        """Format references in the specified citation style."""
-        if style not in self.SUPPORTED_CITATION_STYLES:
-            style = "APA"
+            return output
 
         formatted = []
-        for i, ref in enumerate(references, 1):
-            if style == "APA":
-                cit = ref.to_apa()
-            elif style == "NATURE":
-                cit = ref.to_nature()
-            elif style == "IEEE":
-                authors_str = ", ".join(ref.authors)
-                cit = f"[{i}] {authors_str}, \"{ref.title},\" {ref.journal or ''}, vol. {ref.volume or 'X'}, no. {ref.issue or 'Y'}, pp. {ref.pages or 'ZZ'}, {ref.year}."
-            elif style == "VANCOUVER":
-                authors_str = ", ".join(ref.authors[:6])
-                if len(ref.authors) > 6:
-                    authors_str += ", et al."
-                cit = f"{i}. {authors_str}. {ref.title}. {ref.journal or ''}. {ref.year};{ref.volume or ''}({ref.issue or ''}):{ref.pages or ''}."
-            else:
-                cit = f"{ref.title} ({ref.year})"
-            formatted.append(cit)
-        return formatted
+        for paper in papers:
+            citation = self._format_citation(paper, format_style)
+            formatted.append(citation)
 
-    def _generate_export(self, references: List[Citation], format: str) -> str:
-        """Generate export file content in the specified format."""
-        if format == "RIS":
-            return self._to_ris(references)
-        elif format == "BIB":
-            return self._to_bibtex(references)
-        elif format == "NBIB":
-            return self._to_nbib(references)
-        elif format == "ENW":
-            return self._to_enw(references)
-        return self._to_ris(references)
-
-    def _to_ris(self, references: List[Citation]) -> str:
-        """Convert references to RIS format."""
-        lines = []
-        for ref in references:
-            lines.append("TY  - JOUR")
-            lines.append(f"TI  - {ref.title}")
-            for author in ref.authors:
-                lines.append(f"AU  - {author}")
-            if ref.journal:
-                lines.append(f"JO  - {ref.journal}")
-            if ref.year:
-                lines.append(f"PY  - {ref.year}")
-            if ref.doi:
-                lines.append(f"DO  - {ref.doi}")
-            lines.append("ER  - ")
-            lines.append("")
-        return "\n".join(lines)
-
-    def _to_bibtex(self, references: List[Citation]) -> str:
-        """Convert references to BibTeX format."""
-        entries = []
-        for i, ref in enumerate(references):
-            key = re.sub(r"[^a-zA-Z0-9]", "", ref.authors[0] if ref.authors else "unknown") + str(ref.year or i)
-            entry = f"@article{{{key},\n"
-            entry += f"  title = {{{ref.title}}},\n"
-            entry += f"  author = {{{' and '.join(ref.authors)}}},\n"
-            if ref.journal:
-                entry += f"  journal = {{{ref.journal}}},\n"
-            if ref.year:
-                entry += f"  year = {{{ref.year}}},\n"
-            if ref.doi:
-                entry += f"  doi = {{{ref.doi}}},\n"
-            entry += "}"
-            entries.append(entry)
-        return "\n\n".join(entries)
-
-    def _to_nbib(self, references: List[Citation]) -> str:
-        """Convert references to NBIB (PubMed) format."""
-        lines = []
-        for ref in references:
-            lines.append(f"TI  - {ref.title}")
-            for author in ref.authors:
-                lines.append(f"AU  - {author}")
-            if ref.journal:
-                lines.append(f"JT  - {ref.journal}")
-            if ref.year:
-                lines.append(f"DP  - {ref.year}")
-            lines.append("")
-        return "\n".join(lines)
-
-    def _to_enw(self, references: List[Citation]) -> str:
-        """Convert references to EndNote (ENW) format."""
-        lines = []
-        for ref in references:
-            lines.append("%0 Journal Article")
-            lines.append(f"%T {ref.title}")
-            for author in ref.authors:
-                lines.append(f"%A {author}")
-            if ref.journal:
-                lines.append(f"%J {ref.journal}")
-            if ref.year:
-                lines.append(f"%D {ref.year}")
-            if ref.doi:
-                lines.append(f"%R {ref.doi}")
-            lines.append("")
-        return "\n".join(lines)
-
-    def _audit_citations(self, references: List[Citation]) -> CitationAuditResult:
-        """Perform strict citation independence audit."""
-        result = CitationAuditResult(total_citations=len(references))
-        result.independent_citations = int(len(references) * 0.6)
-        result.self_citations = int(len(references) * 0.15)
-        result.coauthor_citations = int(len(references) * 0.10)
-        result.institutional_citations = int(len(references) * 0.10)
-        result.network_citations = len(references) - (
-            result.independent_citations
-            + result.self_citations
-            + result.coauthor_citations
-            + result.institutional_citations
-        )
-        return result
-
-    def _analyze_high_impact(self, references: List[Citation]) -> Dict[str, Any]:
-        """Analyze high-impact citing works."""
-        return {
-            "top_citations": [
-                {"title": r.title, "impact_score": 85 - i * 5}
-                for i, r in enumerate(references[:5])
-            ],
-            "key_influencers": ["Influencer A", "Influencer B"],
-            "geographic_distribution": {"US": 40, "EU": 35, "Asia": 25},
-            "trend": "rising",
+        output.data = {
+            "format": format_style,
+            "citations": formatted,
+            "export_formats": ["ris", "bib", "nbib", "enw"],
         }
+
+        return output
+
+    def _simulate_search(
+        self,
+        query: str,
+        sources: list[str],
+        max_results: int,
+    ) -> list[dict[str, Any]]:
+        """模拟检索结果（占位实现）。"""
+        # 实际实现应调用各数据库 API
+        return [
+            {
+                "title": f"Sample paper {i+1} for: {query}",
+                "authors": ["Author A", "Author B"],
+                "year": 2024,
+                "journal": "Nature",
+                "doi": f"10.1000/sample.{i+1}",
+                "source": sources[i % len(sources)] if sources else "unknown",
+                "verified": False,
+            }
+            for i in range(min(max_results, 5))
+        ]
+
+    def _format_citation(
+        self,
+        paper: dict[str, Any],
+        format_style: str,
+    ) -> str:
+        """格式化单条引用。"""
+        title = paper.get("title", "")
+        authors = paper.get("authors", [])
+        year = paper.get("year", "")
+        journal = paper.get("journal", "")
+        doi = paper.get("doi", "")
+
+        if format_style == "nature":
+            auth_str = ", ".join(authors[:3]) + (" et al." if len(authors) > 3 else "")
+            return f"{auth_str} {title}. *{journal}* ({year}). https://doi.org/{doi}"
+        elif format_style == "apa":
+            auth_str = ", ".join(authors)
+            return f"{auth_str} ({year}). {title}. *{journal}*. https://doi.org/{doi}"
+        elif format_style == "vancouver":
+            auth_str = ", ".join([a.split()[-1] + " " + "".join([n[0] for n in a.split()[:-1]]) for a in authors[:6]])
+            return f"{auth_str}. {title}. {journal}. {year}."
+        else:
+            return f"{authors} ({year}). {title}. {journal}. DOI: {doi}"

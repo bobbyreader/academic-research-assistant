@@ -1,214 +1,176 @@
-# Nature Skills 科研工作流系统
+# 🔬 Academic Research Assistant
 
-一套完整的学术研究辅助工作流系统，覆盖从研究构思到论文发表再到成果汇报的全生命周期。
+> A comprehensive AI-powered workflow system for scientific research — from hypothesis generation to paper publication and presentation.
 
-## 系统架构
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-green.svg)](https://www.python.org/downloads/)
+[![Stage: Alpha](https://img.shields.io/badge/Stage-Alpha-orange.svg)]()
 
-```
-Nature_Skills/
-├── orchestrator.py          # 主调度器（CLI 入口）
-├── config/
-│   ├── workflow.yaml        # 工作流配置
-│   └── settings.yaml        # 全局设置
-├── core/
-│   ├── __init__.py
-│   ├── skill_bridge.py      # Skill 基类和数据桥接
-│   ├── state_manager.py     # 项目状态管理
-│   └── artifact_store.py    # 产出物版本管理
-├── skills/                  # 10 个 Skill 模块
-│   ├── brainstorming/       # 科学头脑风暴
-│   ├── academic_search/     # 学术检索
-│   ├── literature_review/   # 文献综述
-│   ├── ars_integration/     # ARS 集成
-│   ├── statistics/          # 统计报告
-│   ├── visualization/       # 科学可视化
-│   ├── writing/             # 论文撰写
-│   ├── polishing/           # 润色翻译
-│   ├── reviewer/            # 模拟审稿
-│   └── paper2ppt/           # 论文转 PPT
-├── workflows/               # 工作流模板
-│   ├── lightweight.yaml     # 轻量级
-│   ├── heavyweight.yaml     # 重量级
-│   └── hybrid.yaml          # 混合型（推荐）
-├── scripts/                 # 工具脚本
-├── templates/               # 模板文件
-└── output/                  # 输出目录
-```
+---
 
-## 10 大 Skill 功能
+## 🎯 What Is This?
 
-| Skill | 功能 | 适用阶段 |
-|-------|------|---------|
-| **Brainstorming** | 研究构思、假设生成、跨学科探索 | 阶段 0：构思 |
-| **Academic Search** | 多源检索、引用格式、他引审计 | 阶段 1：文献 |
-| **Literature Review** | 系统性综述、PRISMA、质量评估 | 阶段 1：文献 |
-| **ARS Integration** | 深度研究、论文撰写、多视角评审 | 全流程 |
-| **Statistics** | 统计审查、重复类型区分、审稿回应 | 阶段 2：数据 |
-| **Visualization** | 出版级图表、无障碍审查、导出规划 | 阶段 2：数据 |
-| **Writing** | 手稿起草、claim-evidence 叙事、投稿包 | 阶段 3：撰写 |
-| **Polishing** | 润色翻译、AI 味检查、风格调整 | 阶段 3：撰写 |
-| **Reviewer** | 模拟审稿、三报告交叉验证、12 轴清单 | 阶段 4：审查 |
-| **Paper2PPT** | 论文转中文 PPT、speaker notes | 阶段 5：传播 |
+**Academic Research Assistant** is a modular, end-to-end research workflow system that orchestrates 10 specialized AI skills across the entire research lifecycle — from brainstorming ideas and searching literature, through statistical analysis and visualization, all the way to manuscript writing, peer review simulation, and presentation generation.
 
-## 三种工作流模式
+Think of it as a **research cockpit**: instead of juggling disconnected tools, you have one intelligent system where every module passes data seamlessly to the next, following battle-tested workflows inspired by Nature journal standards, PRISMA guidelines, and academic best practices.
 
-### 1. 轻量级（Lightweight）
-> 适合已有实验数据、需要快速撰写 Nature 风格论文
+---
 
-```
-academic_search → statistics → visualization → writing → polishing → reviewer → paper2ppt
-```
-
-### 2. 重量级（Heavyweight）
-> 适合从零开始做完整研究项目，以 ARS 为核心调度器
-
-```
-brainstorming → ARS Deep Research → ARS Academic Paper → ARS Integrity → ARS Reviewer → ARS Revision → paper2ppt
-```
-
-### 3. 混合型（Hybrid，推荐）
-> 取各 Skill 优势组合，最大化效率
-
-```
-brainstorming → academic_search → literature_review → ARS Deep Research → statistics → visualization → ARS Academic Paper → polishing → reviewer → ARS Integrity Final → paper2ppt
-```
-
-## 快速开始
-
-### 安装
+## ⚡ Quick Start
 
 ```bash
+# Install dependencies
 pip install -r requirements.txt
+
+# Initialize a new research project
+python orchestrator.py init my_paper --mode hybrid
+
+# Run the workflow
+python orchestrator.py run my_paper
+
+# Check progress
+python orchestrator.py status my_paper
+
+# Export deliverables
+python orchestrator.py export my_paper --format md
 ```
 
-### 初始化项目
+**That's it.** In under 5 commands, you've run an 11-stage AI-assisted research pipeline.
 
-```bash
-python orchestrator.py init my_research --mode hybrid
+---
+
+## 🗺️ The Research Lifecycle
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                                                                          │
+│  💡 Ideate          📚 Investigate        📊 Analyze        ✍️ Write     │
+│  ─────────         ─────────────        ─────────        ─────────      │
+│  Brainstorming  →  Academic Search   →  Statistics   →  Writing        │
+│                  →  Literature Rev.   →  Visualization→  Polishing      │
+│                  →  ARS Deep Research                      ↓            │
+│                                                     🔍 Review          │
+│                                                     Reviewer            │
+│                                                     ARS Pipeline        │
+│                                                     ARS Reviewer        │
+│                                                          ↓               │
+│                                              📢 Communicate              │
+│                                              Paper2PPT                  │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 运行工作流
+### Three Workflow Modes
 
-```bash
-python orchestrator.py run my_research --workflow hybrid
+| Mode | Best For | Stages |
+|------|----------|--------|
+| **🔵 Lightweight** | You have data, need a paper fast | 7 stages |
+| **🟡 Heavyweight** | Full research project from scratch | 7 stages |
+| **🟢 Hybrid** *(recommended)* | Maximum flexibility & quality | 11 stages |
+
+---
+
+## 🧩 The 10 Skills
+
+| # | Skill | What It Does |
+|---|-------|-------------|
+| 1 | **Scientific Brainstorming** | 5-phase collaborative ideation — cross-disciplinary analogies, hypothesis flipping, constraint removal, SCAMPER, TRIZ |
+| 2 | **Academic Search** | Multi-source literature retrieval (CrossRef, PubMed, arXiv, Scopus, ScienceDirect) with citation formatting (APA, Nature, IEEE, Vancouver) and self-citation audit |
+| 3 | **Literature Review** | Systematic review with PRISMA flow diagrams, quality assessment tools (Cochrane, Newcastle-Ottawa, AMSTAR 2), and citation verification |
+| 4 | **Nature Statistics** | Statistical method audit — detects pseudoreplication, nested data, multiple comparisons, significance misuse; generates reviewer responses |
+| 5 | **Scientific Visualization** | Publication-ready figures with WCAG 2.2 accessibility review, uncertainty visualization, journal-specific export planning |
+| 6 | **Nature Writing** | Nature-style manuscript drafting — claim-evidence narratives, Chinese-to-English translation, cover letter, highlights, submission checklist |
+| 7 | **Nature Polishing** | Sentence-level editing — translation refinement, AI-taste detection, Nature/Nature Communications paradigm alignment |
+| 8 | **Nature Reviewer** | Pre-submission mock peer review — 3 independent reviewer reports, cross-review synthesis, 12-axis technical checklist, claim-pointer traceability |
+| 9 | **Paper2PPT** | Paper to 10-16 slide Chinese presentation with speaker notes and key figure extraction |
+| 10 | **ARS Integration** | Full Academic Research Suite wrapper — 8 Deep Research modes, 11 Paper modes, 6 Reviewer modes, 10-stage pipeline with mandatory academic integrity checkpoints |
+
+---
+
+## 🏗️ Architecture
+
+```
+academic-research-assistant/
+├── orchestrator.py          # CLI entry point (init/run/status/list/export)
+├── config/
+│   ├── workflow.yaml        # Workflow mode definitions
+│   └── settings.yaml        # API keys, output paths, citation formats
+├── core/
+│   ├── skill_bridge.py      # BaseSkill + SkillOutput (universal interface)
+│   ├── state_manager.py     # Project state + checkpoint persistence
+│   └── artifact_store.py    # Versioned artifact management (v1/v2/v3...)
+├── skills/                  # 10 modular skill implementations
+│   ├── brainstorming/       # Conversational ideation engine
+│   ├── academic_search/     # Multi-source search + citation engine
+│   ├── literature_review/   # Systematic review executor
+│   ├── statistics/          # Statistical audit engine
+│   ├── visualization/       # Publication figure builder
+│   ├── writing/             # Nature manuscript generator
+│   ├── polishing/           # Sentence-level refinement
+│   ├── reviewer/            # Mock peer review simulator
+│   ├── paper2ppt/           # Presentation generator
+│   └── ars_integration/    # ARS pipeline orchestrator
+├── workflows/               # YAML workflow definitions
+├── scripts/                  # CLI tools (citation verifier, PDF generator, PPTX exporter)
+├── templates/                # Document templates (review, cover letter, response)
+└── examples/                 # Quick start demos
 ```
 
-### 查看状态
+---
 
-```bash
-python orchestrator.py status my_research
-```
+## 🔑 Key Features
 
-### 导出产出物
+- **🔗 Seamless Data Flow** — Each skill passes structured outputs to the next. No manual copy-paste between tools.
+- **📈 Versioned Artifacts** — Every output is versioned (v1, v2, v3...). Roll back anytime.
+- **⏸️ Checkpoint & Resume** — Interrupt a workflow and pick up exactly where you left off.
+- **🎯 Status Tracking** — Every stage has a clear status: `ready` / `ready_with_author_checks` / `blocked`. You always know what's done and what needs attention.
+- **📋 Submission Checklist** — Built-in pre-submission integrity checks before you hit "Submit".
+- **🌐 Multi-Source Search** — Query CrossRef, PubMed, arXiv, Scopus, and ScienceDirect simultaneously.
+- **✅ Citation Verification** — Every DOI is verified against CrossRef. No fake citations.
+- **🔒 Academic Integrity Gates** — ARS Pipeline includes mandatory integrity checkpoints (Stage 2.5 & 4.5) that cannot be bypassed.
+- **🎨 Publication-Ready Output** — Figures, manuscripts, and presentations follow Nature journal standards.
 
-```bash
-python orchestrator.py export my_research --format md
-python orchestrator.py export my_research --format pdf
-python orchestrator.py export my_research --format pptx
-```
+---
 
-## 使用示例
+## 👥 Who Is This For?
 
-### 示例 1：科学头脑风暴
+- **PhD students** navigating the literature → writing → submission gauntlet
+- **Researchers** needing systematic review support with PRISMA compliance
+- **Lab groups** wanting consistent, high-quality manuscript standards
+- **Postdocs** preparing for journal submission under Nature or Nature Communications
+- **Academic writers** seeking AI assistance that respects academic integrity
 
-```python
-from skills.brainstorming.skill import BrainstormingSkill
+---
 
-skill = BrainstormingSkill()
-result = skill.execute({
-    "research_topic": "AI 对高等教育质量保障的影响",
-    "current_stage": "understand_context",
-})
-print(result.data["prompts"])
-```
+## 📋 Requirements
 
-### 示例 2：学术检索
+- Python 3.11+
+- API keys for external services (PubMed, Semantic Scholar, CrossRef — free tiers available)
+- Pandoc + xelatex (for PDF export)
+- python-pptx (for PPTX generation)
 
-```python
-from skills.academic_search.skill import AcademicSearchSkill
+---
 
-skill = AcademicSearchSkill()
-result = skill.execute({
-    "action": "search",
-    "query": "artificial intelligence higher education quality assurance",
-    "sources": ["crossref", "pubmed", "semantic_scholar"],
-    "max_results": 20,
-})
-print(result.data["results"])
-```
+## 🤝 Contributing
 
-### 示例 3：统计审查
+Contributions are welcome! Please read our contribution guidelines and submit pull requests. For major changes, please open an issue first to discuss what you would like to change.
 
-```python
-from skills.statistics.skill import StatisticsSkill
+---
 
-skill = StatisticsSkill()
-result = skill.execute({
-    "action": "audit",
-    "statistical_text": "n=5, t-test, p<0.05",
-    "figure_legends": "Figure 1: Bar chart showing...",
-})
-print(result.data["issues"])
-```
+## 📄 License
 
-### 示例 4：论文撰写
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
-```python
-from skills.writing.skill import WritingSkill
+---
 
-skill = WritingSkill()
-result = skill.execute({
-    "action": "draft",
-    "section": "abstract",
-    "claims": [
-        {"text": "AI 显著提升教育质量保障效率", "figures": ["fig1"], "citations": ["ref1"]},
-    ],
-    "figures": [{"id": "fig1", "caption": "效率对比图"}],
-})
-print(result.data["draft_text"])
-```
+## 🙏 Acknowledgments
 
-## 关键特性
+This system is inspired by and integrates concepts from:
 
-- **人机协作**：AI 处理繁琐工作，人类专注思考与判断
-- **多层质量保障**：引用验证、主张审计、学术诚信闸门
-- **透明可追溯**：Material Passport 记录全流程
-- **反 AI 局限性**：针对框架锁定、谄媚倾向、意图检测错误专门优化
-- **模块化设计**：各 Skill 独立可用，也可组合成完整 Pipeline
+- [davila7/claude-code-templates](https://github.com/davila7/claude-code-templates) — Scientific Brainstorming & Literature Review
+- [Yuan1z0825/nature-skills](https://github.com/Yuan1z0825/nature-skills) — Nature Academic Search, Writing, Polishing, Reviewer, Paper2PPT
+- [Imbad0202/academic-research-skills](https://github.com/Imbad0202/academic-research-skills) — Academic Research Suite (ARS)
+- [K-Dense-AI/scientific-agent-skills](https://github.com/K-Dense-AI/scientific-agent-skills) — Scientific Visualization
 
-## 学术诚信保障
+---
 
-系统内置多重学术诚信防线：
-
-1. **引用查验 Gate**：确定性引用存在性查验（Semantic Scholar/OpenAlex/Crossref/arXiv resolver）
-2. **L3 Claim-Faithfulness**：三层引用 anchor + opt-in 审计
-3. **时序验证层**：5 种时序失效模式检测
-4. **跨模型验证**：可选第二 AI 模型独立审查
-5. **不可跳过阶段**：Stage 2.5（审稿前）+ Stage 4.5（最终）强制诚信验证
-
-## 常见问题
-
-### Q: 如何选择工作流模式？
-- **轻量级**：已有数据，快速成文
-- **重量级**：从零开始，完整研究
-- **混合型**：灵活组合，推荐大多数场景
-
-### Q: 如何配置 API 密钥？
-编辑 `config/settings.yaml`，填入对应的 API 密钥。注意：不要将真实密钥提交到版本控制。
-
-### Q: 学术诚信验证可以跳过吗？
-不可以。Stage 2.5 和 Stage 4.5 是强制阶段，这是系统的核心安全设计。
-
-### Q: 支持哪些引用格式？
-Nature、APA 7.0、IEEE、Vancouver、Chicago，可导出 `.ris`/`.bib`/`.nbib`/`.enw`。
-
-## 许可证
-
-CC-BY-NC 4.0（署名-非商业性使用）
-
-## 参考
-
-- [claude-code-templates](https://github.com/davila7/claude-code-templates)
-- [nature-skills](https://github.com/Yuan1z0825/nature-skills)
-- [academic-research-skills](https://github.com/Imbad0202/academic-research-skills)
-- [scientific-agent-skills](https://github.com/K-Dense-AI/scientific-agent-skills)
+*Built with ❤️ for researchers who deserve better tools.*

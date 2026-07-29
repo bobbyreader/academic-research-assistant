@@ -1,266 +1,185 @@
-"""
-Brainstorming skill module for scientific ideation.
+"""科学头脑风暴技能模块。
 
-Implements a 5-stage structured workflow (Understand -> Diverge -> Connect ->
-Critique -> Synthesize) with support for multiple creativity methods including
-SCAMPER, Six Thinking Hats, Morphological Analysis, TRIZ, and Biomimicry.
+提供 5 阶段研究构思工作流：理解背景 → 发散探索 → 建立联系 → 批判性评估 → 综合与后续步骤。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from core.base_skill import BaseSkill, SkillContext, SkillResult
-from core.state_manager import WorkflowStage
-
-from .prompts import METHOD_PROMPTS, STAGE_PROMPTS
+from core.skill_bridge import BaseSkill, SkillOutput, SkillStatus
 
 
 @dataclass
-class ResearchIdea:
-    """A single research idea generated during brainstorming."""
+class BrainstormingStage:
+    """头脑风暴阶段定义。"""
 
-    title: str
-    core_concept: str
-    novelty: str
-    impact: str
-    source_method: str
-    score: Optional[float] = None
-    recommendation: Optional[str] = None
+    name: str
+    description: str
+    prompts: list[str] = field(default_factory=list)
 
 
-@dataclass
-class BrainstormingInput:
-    """Input data for brainstorming skill."""
+class BrainstormingSkill(BaseSkill):
+    """科学头脑风暴技能。
 
-    research_context: str
-    domain: str
-    constraints: str = "Not specified"
-    resources: str = "Not specified"
-    method: str = "SCAMPER"
-    min_ideas: int = 5
-
-
-@dataclass
-class BrainstormingOutput:
-    """Output data from brainstorming skill."""
-
-    research_directions: List[ResearchIdea] = field(default_factory=list)
-    central_hypothesis: str = ""
-    key_questions: List[str] = field(default_factory=list)
-    methodology: str = ""
-    critical_experiments: List[str] = field(default_factory=list)
-    next_actions: List[str] = field(default_factory=list)
-    stage_results: Dict[str, Any] = field(default_factory=dict)
-
-
-class BrainstormingSkill(BaseSkill[BrainstormingInput, BrainstormingOutput]):
-    """Scientific brainstorming skill with structured 5-stage workflow.
-
-    Guides researchers from problem understanding through creative divergence,
-    connection building, critical evaluation, and final synthesis into
-    actionable research directions with testable hypotheses.
+    作为研究构思伙伴，帮助生成假设、探索跨学科联系、
+    挑战假设、开发方法论、识别研究空白。
     """
 
-    SUPPORTED_METHODS = list(METHOD_PROMPTS.keys())
+    name: str = "brainstorming"
+    version: str = "1.0.0"
+    description: str = "研究构思伙伴：生成假设、探索跨学科联系、识别研究空白"
 
-    def __init__(self, context: SkillContext) -> None:
-        super().__init__(context)
-        method = self.context.config.get("default_method")
-        if method and method not in self.SUPPORTED_METHODS:
-            raise ValueError(
-                f"Unsupported method '{method}'. "
-                f"Supported: {self.SUPPORTED_METHODS}"
-            )
+    STAGES: list[BrainstormingStage] = [
+        BrainstormingStage(
+            name="understand_context",
+            description="理解研究背景、兴趣、挑战和约束",
+            prompts=[
+                "你现在对研究的哪个方面最感兴趣？",
+                "什么问题让你夜不能寐？",
+                "你正在做哪些可能值得质疑的假设？",
+                "有没有不符合当前模型的意外发现？",
+            ],
+        ),
+        BrainstormingStage(
+            name="divergent_exploration",
+            description="不加评判地产生广泛想法",
+            prompts=[
+                "让我们从其他领域借鉴一些概念...",
+                "如果相反的情况是真的呢？",
+                "在不同尺度上这个问题会呈现什么面貌？",
+                "如果能测量任何东西，你会测量什么？",
+                "如果必须用19世纪的技术解决呢？",
+            ],
+        ),
+        BrainstormingStage(
+            name="connect_ideas",
+            description="识别模式、主题和意外联系",
+            prompts=[
+                "我注意到几个想法涉及某个共同主题——如果将它们结合起来会怎样？",
+                "这三种方法有什么共同点？是否有更深层的东西？",
+                "你看到的最意外的联系是什么？",
+            ],
+        ),
+        BrainstormingStage(
+            name="critical_evaluation",
+            description="对有前景的想法进行建设性评估",
+            prompts=[
+                "实际测试这个需要什么？",
+                "第一个小实验是什么？",
+                "可以利用哪些现有数据或工具？",
+                "还需要谁参与？",
+                "最大的障碍是什么，如何克服？",
+            ],
+        ),
+        BrainstormingStage(
+            name="synthesize_next_steps",
+            description="凝聚洞察并创建具体前进路径",
+            prompts=[
+                "总结最有前景的方向",
+                "建议即时后续步骤（文献搜索、试点实验、合作）",
+                "捕获未来探索的关键问题",
+            ],
+        ),
+    ]
 
-    @property
-    def name(self) -> str:
-        return "brainstorming"
+    TECHNIQUES: dict[str, str] = {
+        "cross_domain_analogy": "跨领域类比：从其他科学领域借鉴概念",
+        "assumption_reversal": "假设反转：识别核心假设并翻转它们",
+        "scale_shifting": "尺度转换：在不同空间/时间尺度上探索问题",
+        "constraint_removal": "约束移除：想象无限制条件下的解决方案",
+        "constraint_addition": "约束添加：用历史技术限制激发创新",
+        "interdisciplinary_fusion": "跨学科融合：结合不同领域方法论",
+        "technology_speculation": "技术推测：想象新兴技术的应用",
+    }
 
-    @property
-    def stage(self) -> WorkflowStage:
-        return WorkflowStage.BRAINSTORMING
-
-    def execute(self, input_data: BrainstormingInput) -> SkillResult:
-        """Execute the 5-stage brainstorming workflow.
+    def execute(self, input_data: dict[str, Any]) -> SkillOutput:
+        """执行头脑风暴工作流。
 
         Args:
-            input_data: BrainstormingInput containing research context,
-                domain, constraints, method selection, and parameters.
+            input_data: 包含以下键的字典：
+                - research_topic: 研究主题
+                - current_stage: 当前阶段（可选，默认为 understand_context）
+                - conversation_history: 对话历史（可选）
+                - user_responses: 用户对各阶段提示的回应（可选）
 
         Returns:
-            SkillResult with BrainstormingOutput containing research
-            directions, hypotheses, and action items.
+            SkillOutput 包含头脑风暴结果和下一步建议。
         """
+        output = self._create_output()
+
+        research_topic = input_data.get("research_topic", "")
+        if not research_topic:
+            output.add_error("缺少研究主题 (research_topic)")
+            return output
+
+        current_stage_name = input_data.get("current_stage", "understand_context")
+        user_responses = input_data.get("user_responses", {})
+
+        # 找到当前阶段
+        current_stage = None
+        for stage in self.STAGES:
+            if stage.name == current_stage_name:
+                current_stage = stage
+                break
+
+        if current_stage is None:
+            output.add_error(f"未知阶段: {current_stage_name}")
+            return output
+
+        # 构建结果
+        result = {
+            "research_topic": research_topic,
+            "current_stage": current_stage.name,
+            "stage_description": current_stage.description,
+            "prompts": current_stage.prompts,
+            "techniques_available": list(self.TECHNIQUES.keys()),
+            "next_stage": self._get_next_stage(current_stage.name),
+            "all_stages": [s.name for s in self.STAGES],
+        }
+
+        # 如果有用户回应，生成阶段总结
+        if user_responses:
+            result["stage_summary"] = self._summarize_responses(
+                current_stage, user_responses
+            )
+
+        output.data = result
+        output.add_author_check("请确认当前阶段是否已充分探索，或需要继续深入")
+
+        return output
+
+    def _get_next_stage(self, current_stage: str) -> str | None:
+        """获取下一阶段名称。"""
+        stage_order = [s.name for s in self.STAGES]
         try:
-            # Stage 1: Understand
-            stage1_result = self._stage_understand(
-                input_data.research_context,
-                input_data.domain,
-                input_data.constraints,
-                input_data.resources,
-            )
+            idx = stage_order.index(current_stage)
+            return stage_order[idx + 1] if idx + 1 < len(stage_order) else None
+        except ValueError:
+            return None
 
-            # Stage 2: Diverge
-            stage2_result = self._stage_diverge(
-                stage1_result["problem_statement"],
-                input_data.domain,
-                input_data.constraints,
-                input_data.method,
-                input_data.min_ideas,
-            )
-
-            # Stage 3: Connect
-            stage3_result = self._stage_connect(stage2_result)
-
-            # Stage 4: Critique
-            stage4_result = self._stage_critique(stage2_result, stage3_result)
-
-            # Stage 5: Synthesize
-            stage5_result = self._stage_synthesize(
-                stage1_result["problem_statement"], stage4_result
-            )
-
-            # Build output
-            output = BrainstormingOutput(
-                research_directions=[
-                    ResearchIdea(**idea) for idea in stage4_result.get("top_ideas", [])
-                ],
-                central_hypothesis=stage5_result.get("central_hypothesis", ""),
-                key_questions=stage5_result.get("key_questions", []),
-                methodology=stage5_result.get("methodology", ""),
-                critical_experiments=stage5_result.get("critical_experiments", []),
-                next_actions=stage5_result.get("next_actions", []),
-                stage_results={
-                    "stage1_understanding": stage1_result,
-                    "stage2_ideas": stage2_result,
-                    "stage3_connections": stage3_result,
-                    "stage4_critique": stage4_result,
-                    "stage5_synthesis": stage5_result,
-                },
-            )
-
-            # Save artifact
-            self.save_artifact(
-                name="brainstorming_result",
-                content=self._format_output(output),
-                ext=".md",
-                metadata={"method": input_data.method, "domain": input_data.domain},
-            )
-
-            return SkillResult(success=True, data=output)
-
-        except Exception as exc:
-            return SkillResult(success=False, error_message=str(exc))
-
-    def _stage_understand(
-        self, context: str, domain: str, constraints: str, resources: str
-    ) -> Dict[str, Any]:
-        """Stage 1: Understand the research background."""
-        return {
-            "problem_statement": f"Research problem in {domain}: {context[:100]}...",
-            "domain_boundaries": {"in_scope": domain, "out_of_scope": "TBD"},
-            "key_constraints": constraints,
-            "implicit_assumptions": ["Assumption 1", "Assumption 2", "Assumption 3"],
-            "knowledge_gaps": ["Gap 1", "Gap 2"],
-            "success_criteria": "Novel, feasible, high-impact research direction",
-        }
-
-    def _stage_diverge(
+    def _summarize_responses(
         self,
-        problem: str,
-        domain: str,
-        constraints: str,
-        method: str,
-        min_ideas: int,
-    ) -> List[Dict[str, Any]]:
-        """Stage 2: Divergent exploration using selected creativity method."""
-        if method not in self.SUPPORTED_METHODS:
-            method = "SCAMPER"
-
-        ideas = []
-        for i in range(max(min_ideas, 5)):
-            ideas.append(
-                {
-                    "title": f"{method} Idea {i + 1}",
-                    "core_concept": f"Concept generated via {method} for {domain}",
-                    "novelty": "Moderate to high novelty",
-                    "impact": "medium",
-                    "source_method": method,
-                }
-            )
-        return ideas
-
-    def _stage_connect(self, ideas: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Stage 3: Build connections between ideas."""
+        stage: BrainstormingStage,
+        responses: dict[str, str],
+    ) -> dict[str, Any]:
+        """总结用户回应（占位实现，实际应调用 LLM）。"""
         return {
-            "synergistic_pairs": [],
-            "hybrid_concepts": [],
-            "contradictions": [],
-            "missing_links": [],
-            "cluster_themes": [f"Cluster around {ideas[0]['title']}" if ideas else "No clusters"],
+            "stage": stage.name,
+            "response_count": len(responses),
+            "key_insights": ["[待 LLM 生成]"],
+            "emerging_themes": ["[待 LLM 生成]"],
+            "recommended_next_steps": ["[待 LLM 生成]"],
         }
 
-    def _stage_critique(
-        self, ideas: List[Dict[str, Any]], connections: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Stage 4: Critically evaluate ideas."""
-        top_ideas = []
-        for idea in ideas[:3]:
-            idea["score"] = 7.5
-            idea["recommendation"] = "pursue"
-            top_ideas.append(idea)
+    def get_stage_prompts(self, stage_name: str) -> list[str]:
+        """获取指定阶段的提示问题列表。"""
+        for stage in self.STAGES:
+            if stage.name == stage_name:
+                return stage.prompts
+        return []
 
-        return {
-            "evaluations": top_ideas,
-            "top_ideas": top_ideas,
-            "discarded": ideas[3:],
-            "critique_summary": "3 ideas recommended for pursuit",
-        }
-
-    def _stage_synthesize(
-        self, problem: str, critique: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Stage 5: Synthesize into actionable research plan."""
-        return {
-            "primary_direction": critique["top_ideas"][0]["title"] if critique["top_ideas"] else "TBD",
-            "central_hypothesis": "To be formulated based on selected direction",
-            "key_questions": [
-                "What is the mechanism underlying the observed phenomenon?",
-                "How does this approach compare to existing methods?",
-                "What are the boundary conditions for applicability?",
-            ],
-            "methodology": "Mixed-methods approach combining computational and experimental validation",
-            "critical_experiments": ["Proof-of-concept demonstration", "Benchmark comparison"],
-            "next_actions": [
-                "Conduct targeted literature review",
-                "Draft preliminary experimental design",
-                "Identify potential collaborators",
-            ],
-        }
-
-    def _format_output(self, output: BrainstormingOutput) -> str:
-        """Format output as Markdown."""
-        lines = [
-            "# Brainstorming Results",
-            "",
-            f"## Central Hypothesis",
-            output.central_hypothesis or "To be formulated",
-            "",
-            "## Research Directions",
-        ]
-        for i, idea in enumerate(output.research_directions, 1):
-            lines.append(f"{i}. **{idea.title}** (Score: {idea.score})")
-            lines.append(f"   - {idea.core_concept}")
-            lines.append(f"   - Novelty: {idea.novelty} | Impact: {idea.impact}")
-            lines.append("")
-
-        lines.extend([
-            "## Key Questions",
-            *[f"- {q}" for q in output.key_questions],
-            "",
-            "## Next Actions",
-            *[f"- {a}" for a in output.next_actions],
-        ])
-        return "\n".join(lines)
+    def get_technique_description(self, technique: str) -> str:
+        """获取指定头脑风暴技术的描述。"""
+        return self.TECHNIQUES.get(technique, "未知技术")
