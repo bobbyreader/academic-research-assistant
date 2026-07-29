@@ -124,3 +124,7 @@ projects/
 outputs/
 temp/
 *.log
+
+# AI tool working state (team configs, inboxes, memory) - internal, not for public repo
+.codebuddy/
+.workbuddy/
