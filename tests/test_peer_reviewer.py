@@ -278,6 +278,38 @@ def test_claim_verification_injects_traceability_concerns() -> None:
     assert "论断—证据核验结果" in llm.calls[0][1]
 
 
+def test_concern_with_fabricated_evidence_is_dropped() -> None:
+    """A concern whose quote is not in the manuscript must not survive."""
+    llm = FakeLLM(
+        [
+            _payload(
+                concerns=[
+                    {
+                        "category": "methodology",
+                        "severity": "major",
+                        "statement": "Fabricated evidence.",
+                        "evidence": "A SENTENCE THAT IS NOT IN THE MANUSCRIPT",
+                    }
+                ]
+            )
+        ]
+    )
+
+    bundle = _review(llm, reviewer_count=1)
+
+    assert bundle.reports[0].concerns == []
+    assert any("无法在稿件中找到" in warning for warning in bundle.warnings)
+
+
+def test_concern_with_grounded_evidence_is_kept() -> None:
+    llm = FakeLLM([_payload()])
+
+    bundle = _review(llm, reviewer_count=1)
+
+    assert len(bundle.reports[0].concerns) == 1
+    assert not any("无法在稿件中找到" in warning for warning in bundle.warnings)
+
+
 def test_absent_claim_verification_injects_nothing() -> None:
     llm = FakeLLM([_payload()] * 3)
 

@@ -18,6 +18,13 @@ from core.research_models import PaperRecord
 P1_ABSTRACT = "Urban heat islands raise cardiovascular mortality in elderly residents."
 P2_ABSTRACT = "Green roofs reduce indoor temperatures during summer heat waves."
 
+#: 与 P1_ABSTRACT 完全一致的真实引用（用于核验通过路径）。
+P1_QUOTE = P1_ABSTRACT
+P2_QUOTE = P2_ABSTRACT
+
+#: 一个宣称来自摘要、实则不在摘要中的编造引用。
+FABRICATED_QUOTE = "THIS SENTENCE IS NOT IN THE ABSTRACT AT ALL"
+
 
 class FakeLLM:
     """Deterministic stand-in for an LLM client (no network)."""
@@ -43,16 +50,22 @@ def _papers() -> list[PaperRecord]:
     ]
 
 
+#: 默认回显的论断原文：多数测试只有一条论断，便于省略 claim 参数。
+_DEFAULT_CLAIM = "Heat raises mortality."
+
+
 def _verdict(
     claim_index: int,
     citation_id: str,
     verdict: str,
     *,
+    claim: str = _DEFAULT_CLAIM,
     quote: str = "quoted evidence",
     rationale: str = "looks right",
 ) -> dict:
     return {
         "claim_index": claim_index,
+        "claim": claim,
         "citation_id": citation_id,
         "verdict": verdict,
         "quote": quote,
@@ -81,11 +94,15 @@ def test_all_supported_passes_without_warnings() -> None:
 # 2. 一条 unsupported
 # --------------------------------------------------------------------------- #
 def test_unsupported_claim_is_surfaced_and_fails_report() -> None:
-    llm = FakeLLM({"verdicts": [_verdict(0, "P1", "unsupported", quote=P2_ABSTRACT)]})
+    # 引用逐字来自 P1 摘要，只是内容与论断相反 → unsupported 得以保留。
+    claim = "Heat lowers mortality."
+    llm = FakeLLM(
+        {"verdicts": [_verdict(0, "P1", "unsupported", claim=claim, quote=P1_ABSTRACT)]}
+    )
 
     report = verify_claims(
         llm,
-        claims=[{"claim": "Green roofs kill people.", "citation_ids": ["P1"]}],
+        claims=[{"claim": claim, "citation_ids": ["P1"]}],
         papers=_papers(),
     )
 
@@ -143,11 +160,14 @@ def test_verdict_for_uncited_id_is_dropped() -> None:
 # 5. 覆盖保证：模型漏答 → 补齐 unclear
 # --------------------------------------------------------------------------- #
 def test_missing_pair_is_filled_with_unclear() -> None:
-    llm = FakeLLM({"verdicts": [_verdict(0, "P1", "supports", quote=P1_ABSTRACT)]})
+    claim = "Two sources support this."
+    llm = FakeLLM(
+        {"verdicts": [_verdict(0, "P1", "supports", claim=claim, quote=P1_ABSTRACT)]}
+    )
 
     report = verify_claims(
         llm,
-        claims=[{"claim": "Two sources support this.", "citation_ids": ["P1", "P2"]}],
+        claims=[{"claim": claim, "citation_ids": ["P1", "P2"]}],
         papers=_papers(),
     )
 
@@ -209,11 +229,14 @@ def test_missing_abstract_is_unclear_without_asking_model() -> None:
         PaperRecord(title="Has abstract", abstract=P1_ABSTRACT),
         PaperRecord(title="No abstract", abstract="   "),
     ]
-    llm = FakeLLM({"verdicts": [_verdict(0, "P1", "supports", quote=P1_ABSTRACT)]})
+    claim = "Two sources support this."
+    llm = FakeLLM(
+        {"verdicts": [_verdict(0, "P1", "supports", claim=claim, quote=P1_ABSTRACT)]}
+    )
 
     report = verify_claims(
         llm,
-        claims=[{"claim": "Two sources support this.", "citation_ids": ["P1", "P2"]}],
+        claims=[{"claim": claim, "citation_ids": ["P1", "P2"]}],
         papers=papers,
     )
 
@@ -259,18 +282,19 @@ def test_empty_claims_returns_empty_report_and_never_calls_model() -> None:
 # 11. overall 最坏判定
 # --------------------------------------------------------------------------- #
 def test_overall_is_worst_verdict() -> None:
+    claim = "Mixed evidence."
     llm = FakeLLM(
         {
             "verdicts": [
-                _verdict(0, "P1", "supports", quote=P1_ABSTRACT),
-                _verdict(0, "P2", "unsupported", quote=P2_ABSTRACT),
+                _verdict(0, "P1", "supports", claim=claim, quote=P1_ABSTRACT),
+                _verdict(0, "P2", "unsupported", claim=claim, quote=P2_ABSTRACT),
             ]
         }
     )
 
     report = verify_claims(
         llm,
-        claims=[{"claim": "Mixed evidence.", "citation_ids": ["P1", "P2"]}],
+        claims=[{"claim": claim, "citation_ids": ["P1", "P2"]}],
         papers=_papers(),
     )
 
@@ -297,8 +321,10 @@ def test_identical_inputs_and_replies_are_deterministic() -> None:
         llm = FakeLLM(
             {
                 "verdicts": [
-                    _verdict(0, "P1", "partially_supports", quote=P1_ABSTRACT),
-                    _verdict(1, "P1", "supports", quote=P1_ABSTRACT),
+                    _verdict(
+                        0, "P1", "partially_supports", claim="First claim.", quote=P1_ABSTRACT
+                    ),
+                    _verdict(1, "P1", "supports", claim="Second claim.", quote=P1_ABSTRACT),
                 ]
             }
         )
@@ -345,7 +371,13 @@ def test_verdicts_vocabulary_is_exposed() -> None:
 def test_to_dict_exposes_keys_the_peer_reviewer_reads() -> None:
     # core/peer_reviewer.py injects deterministic concerns by reading these
     # counts off the dict, so missing keys would silently drop a cross-check.
-    llm = FakeLLM({"verdicts": [_verdict(0, "P1", "unsupported", quote=P2_ABSTRACT)]})
+    llm = FakeLLM(
+        {
+            "verdicts": [
+                _verdict(0, "P1", "unsupported", claim="Unsupported.", quote=P1_ABSTRACT)
+            ]
+        }
+    )
 
     report = verify_claims(
         llm,
@@ -409,3 +441,239 @@ def test_author_checks_state_advisory_and_abstract_only() -> None:
     assert "建议" in joined
     assert "摘要" in joined
     assert report.author_checks
+
+
+# --------------------------------------------------------------------------- #
+# 14. 回归：索引漂移的假阳性（同一文献被多条论断引用）
+# --------------------------------------------------------------------------- #
+def test_index_drift_same_paper_cannot_support_wrong_claim() -> None:
+    """模型把 claim 0 的判定错标为 claim_index=1 时，绝不能被当作 claim 1 的证据。
+
+    这正是本门要防的假阳性：两条论断引用同一篇论文，(claim_index, citation_id)
+    仍然是合法配对，若只校验配对存在，判定就会落到错误的论断上。
+    """
+    papers = [PaperRecord(title="P1", abstract="Sleep improves memory.")]
+    claims = [
+        {"claim": "Sleep improves memory", "citation_ids": ["P1"]},
+        {"claim": "Sleep causes cancer", "citation_ids": ["P1"]},
+    ]
+    # 模型判断的是 claim 0 的文本，却把它标注为 claim_index=1。
+    llm = FakeLLM(
+        {
+            "verdicts": [
+                _verdict(
+                    1,
+                    "P1",
+                    "supports",
+                    claim="Sleep improves memory",
+                    quote="Sleep improves memory.",
+                    rationale="支持。",
+                )
+            ]
+        }
+    )
+
+    report = verify_claims(llm, claims=claims, papers=papers)
+
+    # 错位的判定必须被丢弃：claim 1 不得被判为 supports。
+    assert report.claims[1].overall != "supports"
+    assert report.claims[1].overall == "unclear"
+    assert report.claims[1].evidence[0].verdict == "unclear"
+    # claim 0 也没有有效判定（模型根本没给它回显 claim 0 的文本）。
+    assert report.claims[0].overall == "unclear"
+    assert any(
+        "回显的论断与请求不一致" in warning for warning in report.warnings
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 15. 回显一致 → 判定照常生效
+# --------------------------------------------------------------------------- #
+def test_matching_echo_is_applied() -> None:
+    claim = "Heat raises mortality."
+    llm = FakeLLM(
+        {"verdicts": [_verdict(0, "P1", "supports", claim=claim, quote=P1_ABSTRACT)]}
+    )
+
+    report = verify_claims(
+        llm, claims=[{"claim": claim, "citation_ids": ["P1"]}], papers=_papers()
+    )
+
+    assert report.claims[0].overall == "supports"
+    assert not any("回显的论断与请求不一致" in warning for warning in report.warnings)
+
+
+# --------------------------------------------------------------------------- #
+# 16. 释义回显（同义改写）→ 丢弃并降级
+# --------------------------------------------------------------------------- #
+def test_paraphrased_echo_is_dropped_and_downgraded() -> None:
+    claim = "Heat raises mortality."
+    llm = FakeLLM(
+        {
+            "verdicts": [
+                _verdict(
+                    0,
+                    "P1",
+                    "supports",
+                    claim="High temperatures increase death rates.",
+                    quote=P1_ABSTRACT,
+                )
+            ]
+        }
+    )
+
+    report = verify_claims(
+        llm, claims=[{"claim": claim, "citation_ids": ["P1"]}], papers=_papers()
+    )
+
+    evidence = report.claims[0].evidence[0]
+    assert evidence.verdict == "unclear"
+    assert report.claims[0].overall == "unclear"
+    assert "模型回显的论断与请求不一致" in evidence.rationale
+    assert any("回显的论断与请求不一致" in warning for warning in report.warnings)
+
+
+# --------------------------------------------------------------------------- #
+# 17. 归一化容错：仅空白与标点差异 → 仍接受
+# --------------------------------------------------------------------------- #
+def test_echo_tolerating_whitespace_and_punctuation_is_accepted() -> None:
+    claim = "Heat raises mortality."
+    llm = FakeLLM(
+        {
+            "verdicts": [
+                _verdict(
+                    0,
+                    "P1",
+                    "supports",
+                    claim="  heat, raises   mortality! ",
+                    quote=P1_ABSTRACT,
+                )
+            ]
+        }
+    )
+
+    report = verify_claims(
+        llm, claims=[{"claim": claim, "citation_ids": ["P1"]}], papers=_papers()
+    )
+
+    assert report.claims[0].overall == "supports"
+    assert report.claims[0].evidence[0].verdict == "supports"
+
+
+# --------------------------------------------------------------------------- #
+# 18. 错位判定不得泄漏到其他论断
+# --------------------------------------------------------------------------- #
+def test_misaligned_verdict_does_not_leak_to_other_claims() -> None:
+    papers = [PaperRecord(title="P1", abstract="Sleep improves memory.")]
+    claims = [
+        {"claim": "First", "citation_ids": ["P1"]},
+        {"claim": "Second", "citation_ids": ["P1"]},
+        {"claim": "Third", "citation_ids": ["P1"]},
+    ]
+    llm = FakeLLM(
+        {
+            "verdicts": [
+                _verdict(2, "P1", "supports", claim="First", quote="Sleep improves memory.")
+            ]
+        }
+    )
+
+    report = verify_claims(llm, claims=claims, papers=papers)
+
+    # 没有任何论断可以凭这条错位判定获得 supports。
+    assert [claim.overall for claim in report.claims] == ["unclear", "unclear", "unclear"]
+
+
+# --------------------------------------------------------------------------- #
+# 19. 编造引用：quote 不在摘要中 → 降级
+# --------------------------------------------------------------------------- #
+def test_fabricated_quote_is_downgraded_to_unclear() -> None:
+    claim = "Heat raises mortality."
+    llm = FakeLLM(
+        {
+            "verdicts": [
+                _verdict(
+                    0, "P1", "supports", claim=claim, quote=FABRICATED_QUOTE
+                )
+            ]
+        }
+    )
+
+    report = verify_claims(
+        llm, claims=[{"claim": claim, "citation_ids": ["P1"]}], papers=_papers()
+    )
+
+    evidence = report.claims[0].evidence[0]
+    assert evidence.verdict == "unclear"
+    assert report.claims[0].overall == "unclear"
+    assert "引用未能在摘要中找到" in evidence.rationale
+    assert any("引用未能在被引摘要中找到" in warning for warning in report.warnings)
+
+
+# --------------------------------------------------------------------------- #
+# 20. 真实引用（取自摘要）→ 保留判定
+# --------------------------------------------------------------------------- #
+def test_genuine_quote_is_kept() -> None:
+    claim = "Heat raises mortality."
+    llm = FakeLLM(
+        {"verdicts": [_verdict(0, "P1", "supports", claim=claim, quote=P1_QUOTE)]}
+    )
+
+    report = verify_claims(
+        llm, claims=[{"claim": claim, "citation_ids": ["P1"]}], papers=_papers()
+    )
+
+    assert report.claims[0].evidence[0].verdict == "supports"
+    assert not any("引用未能在被引摘要中找到" in warning for warning in report.warnings)
+
+
+# --------------------------------------------------------------------------- #
+# 21. 引用仅空白/标点差异 → 仍保留
+# --------------------------------------------------------------------------- #
+def test_quote_tolerating_whitespace_and_punctuation_is_kept() -> None:
+    claim = "Heat raises mortality."
+    noisy_quote = "Urban   heat islands, raise cardiovascular mortality!"
+    llm = FakeLLM(
+        {"verdicts": [_verdict(0, "P1", "supports", claim=claim, quote=noisy_quote)]}
+    )
+
+    report = verify_claims(
+        llm, claims=[{"claim": claim, "citation_ids": ["P1"]}], papers=_papers()
+    )
+
+    assert report.claims[0].evidence[0].verdict == "supports"
+
+
+# --------------------------------------------------------------------------- #
+# 22. 省略号拼接引用：两段都在摘要中 → 保留
+# --------------------------------------------------------------------------- #
+def test_ellipsis_quote_with_all_fragments_present_is_kept() -> None:
+    claim = "Heat raises mortality."
+    quote = "Urban heat islands ... cardiovascular mortality"
+    llm = FakeLLM(
+        {"verdicts": [_verdict(0, "P1", "supports", claim=claim, quote=quote)]}
+    )
+
+    report = verify_claims(
+        llm, claims=[{"claim": claim, "citation_ids": ["P1"]}], papers=_papers()
+    )
+
+    assert report.claims[0].evidence[0].verdict == "supports"
+
+
+# --------------------------------------------------------------------------- #
+# 23. 省略号拼接引用：有一段不在摘要中 → 降级
+# --------------------------------------------------------------------------- #
+def test_ellipsis_quote_with_missing_fragment_is_downgraded() -> None:
+    claim = "Heat raises mortality."
+    quote = "Urban heat islands ... a sentence that never appears"
+    llm = FakeLLM(
+        {"verdicts": [_verdict(0, "P1", "supports", claim=claim, quote=quote)]}
+    )
+
+    report = verify_claims(
+        llm, claims=[{"claim": claim, "citation_ids": ["P1"]}], papers=_papers()
+    )
+
+    assert report.claims[0].evidence[0].verdict == "unclear"
+    assert "引用未能在摘要中找到" in report.claims[0].evidence[0].rationale

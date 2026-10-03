@@ -10,10 +10,22 @@ The rule that makes the check trustworthy is **evidence-bound**:
 
 * a verdict only exists if it can quote the abstract verbatim. A verdict whose
   ``quote`` is empty or whitespace is not "probably fine" — it is forced to
-  ``unclear`` before a reader ever sees it. The model can therefore never assert
-  "supported" without pointing at the sentence that supports it;
+  ``unclear`` before a reader ever sees it. The quote must also actually **occur
+  in that paper's abstract** (checked via
+  :func:`core.quote_grounding.is_quote_grounded`, tolerant of spacing and
+  punctuation only): a plausible-looking but fabricated sentence is not
+  evidence and is downgraded to ``unclear``. The model can therefore never assert
+  "supported" without pointing at a sentence that really exists in the abstract;
 * a verdict for a citation the claim did not cite is dropped: the model may not
-  introduce citations.
+  introduce citations;
+* a verdict must **echo the claim text it judged**, and is accepted only when that
+  echo matches the claim at ``claim_index`` (after
+  :func:`_normalize_claim_text`). This closes a false-positive mode where several
+  claims cite the same popular paper: a shifted ``claim_index`` would still name a
+  pending ``(claim_index, citation_id)`` pair, so a verdict could silently land on
+  the wrong claim. Requiring the echoed text to agree makes the wrong pairing
+  structurally impossible — a misaligned verdict is dropped and degraded to
+  ``unclear`` rather than guessed.
 
 The check is deliberately **advisory** rather than blocking:
 
@@ -31,6 +43,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from core.quote_grounding import is_quote_grounded
 from core.research_models import PaperRecord
 
 #: Allowed ``verdict`` values, ordered from most to least favourable.
@@ -61,6 +74,16 @@ _MAX_CLAIMS = 20
 #: Marker appended when a verdict is downgraded for lack of a verbatim quote.
 _NO_QUOTE_MARKER = "（未提供原文引用，已降级为 unclear）"
 
+#: 在 :func:`_normalize_claim_text` 中予以忽略的标点字符集合。
+#: 仅容忍间距与标点差异，不允许任何实词层面的改写。
+_CLAIM_TEXT_IGNORED_CHARS = "，。、；：！？,.;:!?（）()「」《》\"\"''\"'"
+
+#: 论断回显不一致时的降级理由（模型回显与请求不匹配）。
+_MISALIGNED_CLAIM_RATIONALE = "模型回显的论断与请求不一致，已降级"
+
+#: Marker appended when a non-empty quote cannot be found in the cited abstract.
+_UNGROUNDED_QUOTE_MARKER = "（引用未能在摘要中找到，已降级为 unclear）"
+
 #: The verifier only ever sees material it was handed; it never trusts the
 #: material itself as an instruction source.
 _SYSTEM_PROMPT = (
@@ -73,6 +96,8 @@ _SYSTEM_PROMPT = (
     "3. 每条判定都必须提供 quote 字段，**逐字摘录**摘要中支撑该判定的原句；"
     "无法逐字摘录时不得声称 supported，应判为 unclear。\n"
     "4. 只能对给定的引用标识逐一判定，不得引入新的引用标识。\n"
+    "4.1 每条判定都必须在 claim 字段中**逐字复制**你本次判断的论断原文，"
+    "不得改写、概括或翻译；回显原文与请求不一致的判定会被系统丢弃并降级。\n"
     "5. verdict 只能取 supports、partially_supports、unsupported、unclear 之一。\n"
     "6. 只输出 JSON 对象，不要输出任何解释性文字或 Markdown 代码块标记。\n"
 )
@@ -273,6 +298,20 @@ def _coerce_verdict(value: object) -> str:
     return text if text in VERDICTS else _DEFAULT_VERDICT
 
 
+def _normalize_claim_text(text: object) -> str:
+    """归一化论断文本，用于比对模型回显与请求原文。
+
+    仅容忍**间距与标点**差异：转为小写、去除全部空白字符，并剔除
+    :data:`_CLAIM_TEXT_IGNORED_CHARS` 中列出的标点。任何实词层面的改写
+    （概括、翻译、同义替换）都会在归一化后产生差异，因此不会被误判为一致。
+    """
+    text = _coerce_str(text).lower()
+    stripped = "".join(
+        char for char in text if not char.isspace() and char not in _CLAIM_TEXT_IGNORED_CHARS
+    )
+    return stripped
+
+
 # --------------------------------------------------------------------------- #
 # 提示词构建
 # --------------------------------------------------------------------------- #
@@ -311,11 +350,14 @@ def _build_user_prompt(claims: Sequence[dict[str, object]]) -> str:
             "=== 结束 ===",
             "",
             "请严格按以下 JSON 结构输出（claim_index 必须与上文一一对应，",
-            "citation_id 只能取该论断已引用的标识，quote 必须逐字引用摘要，否则该条判定将被降级）：",
+            "claim 必须**逐字复制**上文对应 claim_index 的论断原文，",
+            "citation_id 只能取该论断已引用的标识，quote 必须逐字引用摘要，",
+            "否则该条判定将被降级）：",
             "{",
             '  "verdicts": [',
             "    {",
             '      "claim_index": 0,',
+            '      "claim": "逐字复制的论断原文",',
             '      "citation_id": "P1",',
             '      "verdict": "supports|partially_supports|unsupported|unclear",',
             '      "quote": "摘要中支撑该判定的原句，逐字摘录，不可为空",',
@@ -426,6 +468,7 @@ def verify_claims(
 
     # 唯一一次模型调用；失败一律降级。
     verdicts_by_pair: dict[tuple[int, str], tuple[str, str, str]] = {}
+    misaligned_keys: list[tuple[int, str]] = []
     if pending:
         try:
             payload = llm_client.complete_json(
@@ -436,22 +479,33 @@ def verify_claims(
                 f"论断证据核验的模型调用失败，全部待核验论断已降级为 unclear：{exc}"
             )
         else:
-            verdicts_by_pair = _parse_model_verdicts(payload, pending)
+            verdicts_by_pair, misaligned_keys = _parse_model_verdicts(payload, pending)
+            if misaligned_keys:
+                # 回显不一致意味着无法确认归属，安全方向是降级而非猜测。
+                warnings.append(
+                    f"{len(misaligned_keys)} 条判定因模型回显的论断与请求不一致"
+                    "被丢弃并降级为 unclear。"
+                )
+
+    misaligned_set = set(misaligned_keys)
 
     # 组装报告：覆盖保证 → 每条 (论断, 已引用且有摘要的文献) 恰好一条证据。
     claim_verdicts: list[ClaimVerdict] = []
+    ungrounded_count = 0
     for index, claim_text, resolvable in normalized:
         citation_ids = _coerce_str_list(_safe_dict(claims[index]).get("citation_ids"))
         evidence: list[ClaimEvidence] = []
         for citation_id, paper in resolvable:
             parsed = verdicts_by_pair.get((index, citation_id))
-            evidence.append(
-                _build_evidence(
-                    citation_id=citation_id,
-                    paper=paper,
-                    parsed=parsed,
-                )
+            built = _build_evidence(
+                citation_id=citation_id,
+                paper=paper,
+                parsed=parsed,
+                misaligned=(index, citation_id) in misaligned_set,
             )
+            if _UNGROUNDED_QUOTE_MARKER in built.rationale:
+                ungrounded_count += 1
+            evidence.append(built)
         # 未知标识与缺失摘要：判为 unclear，且从未询问模型。
         for citation_id in citation_ids:
             position = _paper_position(citation_id)
@@ -487,6 +541,13 @@ def verify_claims(
             )
         )
 
+    if ungrounded_count:
+        # 引用无法在摘要中定位 → 编造或错引，一律降级并上报。
+        warnings.append(
+            f"{ungrounded_count} 条判定的引用未能在被引摘要中找到，"
+            "已降级为 unclear。"
+        )
+
     warnings.extend(
         _build_warnings(
             claim_verdicts,
@@ -515,9 +576,21 @@ def _paper_position(citation_id: str) -> int | None:
 def _parse_model_verdicts(
     payload: object,
     pending: Mapping[tuple[int, str], tuple[str, PaperRecord]],
-) -> dict[tuple[int, str], tuple[str, str, str]]:
-    """解析模型判定，丢弃无法归属到某个已引用配对的条目（防编造）。"""
+) -> tuple[dict[tuple[int, str], tuple[str, str, str]], list[tuple[int, str]]]:
+    """解析模型判定，返回 (已接受的判定, 因回显不一致而丢弃的配对列表)。
+
+    一条判定被接受当且仅当下列条件**全部**成立：
+
+    * ``(claim_index, citation_id)`` 位于 ``pending``（防编造引用）；
+    * ``claim_index`` 处于请求范围内；
+    * 模型回显的 ``claim`` 与 ``pending`` 中该论断的原文（经
+      :func:`_normalize_claim_text` 归一化后）**完全一致**。
+
+    任何一项不满足即丢弃：模型回显的论断与请求不一致意味着无法确认该判定
+    究竟针对哪条论断，安全方向是降级为 unclear 而非猜测归属。
+    """
     parsed: dict[tuple[int, str], tuple[str, str, str]] = {}
+    misaligned: list[tuple[int, str]] = []
     for raw in _iter_raw_verdicts(payload):
         try:
             index = int(raw.get("claim_index"))  # type: ignore[arg-type]
@@ -528,12 +601,18 @@ def _parse_model_verdicts(
         if key not in pending or key in parsed:
             # 引用标识不在该论断的引用列表内 → 丢弃，模型不得引入引用。
             continue
+        expected_claim = pending[key][0]
+        echoed_claim = raw.get("claim")
+        if _normalize_claim_text(echoed_claim) != _normalize_claim_text(expected_claim):
+            # 回显与请求论断不一致 → 无法确认归属，丢弃并降级。
+            misaligned.append(key)
+            continue
         parsed[key] = (
             _coerce_verdict(raw.get("verdict")),
             _coerce_str(raw.get("quote")),
             _coerce_str(raw.get("rationale")),
         )
-    return parsed
+    return parsed, misaligned
 
 
 def _build_evidence(
@@ -541,21 +620,36 @@ def _build_evidence(
     citation_id: str,
     paper: PaperRecord,
     parsed: tuple[str, str, str] | None,
+    misaligned: bool = False,
 ) -> ClaimEvidence:
-    """把一条模型判定（或缺失）规整为证据条目，并执行证据约束。"""
+    """把一条模型判定（或缺失）规整为证据条目，并执行证据约束。
+
+    证据约束分两层：(1) 回显论断必须与请求一致（``misaligned`` 由解析器标记）；
+    (2) quote 必须能在**该论断被引文献的摘要**中定位到。任一层不满足即降级为
+    ``unclear``，绝不保留模型声称的支持。
+    """
     if parsed is None:
+        rationale = (
+            _MISALIGNED_CLAIM_RATIONALE
+            if misaligned
+            else "模型未对该文献给出判定"
+        )
         return ClaimEvidence(
             citation_id=citation_id,
             paper_title=paper.title,
             verdict="unclear",
             quote="",
-            rationale="模型未对该文献给出判定",
+            rationale=rationale,
         )
 
     verdict, quote, rationale = parsed
     if not quote:
         # 证据约束：没有逐字引用就不能声称 supported。
         rationale = (rationale or "模型未给出理由") + _NO_QUOTE_MARKER
+        verdict = "unclear"
+    elif not is_quote_grounded(quote, paper.abstract):
+        # 证据约束：引用必须是摘要中真实存在的文本，凭空编造一律降级。
+        rationale = (rationale or "模型未给出理由") + _UNGROUNDED_QUOTE_MARKER
         verdict = "unclear"
 
     return ClaimEvidence(

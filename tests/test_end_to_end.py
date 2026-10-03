@@ -82,6 +82,7 @@ class FakeLLM:
                 "verdicts": [
                     {
                         "claim_index": 0,
+                        "claim": "Adaptation is context-dependent",
                         "citation_id": "P1",
                         "verdict": "supports",
                         "quote": "A finding.",

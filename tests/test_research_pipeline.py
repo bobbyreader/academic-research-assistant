@@ -63,6 +63,7 @@ class FakeLLM:
                 "verdicts": [
                     {
                         "claim_index": 0,
+                        "claim": "Adaptation is context-dependent",
                         "citation_id": "P1",
                         "verdict": "supports",
                         "quote": "A finding.",
@@ -463,6 +464,7 @@ def test_unsupported_claim_is_advisory_and_reaches_the_review(tmp_path: Path) ->
                     "verdicts": [
                         {
                             "claim_index": 0,
+                            "claim": "Adaptation is context-dependent",
                             "citation_id": "P1",
                             "verdict": "unsupported",
                             "quote": "A finding.",

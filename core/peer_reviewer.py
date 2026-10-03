@@ -6,15 +6,19 @@ statistics report — into a simulated peer review of the drafted manuscript.
 
 Two principles make the review trustworthy rather than ornamental:
 
-* **Evidence-bound.** Every concern must be anchored to real evidence; a
-  concern whose ``evidence`` is empty or whitespace is dropped before a reader
-  ever sees it. What counts as evidence depends on where the concern came from:
-    - a **model concern** must quote manuscript text verbatim — the model may
-      only reason about the manuscript and the reports it was handed;
+* **Evidence-bound.** Every concern must be anchored to real evidence, and that
+  is *checked* rather than assumed. What counts as evidence depends on where the
+  concern came from:
+    - a **model concern** must quote the manuscript, and the quote is verified
+      with :func:`core.quote_grounding.is_quote_grounded` against the manuscript
+      body. A quote that does not actually occur there is dropped — checking only
+      that it is non-empty would let a model invent a plausible sentence, and a
+      fabricated quote looks like evidence, which is worse than no quote at all;
     - an **injected concern** (see below) instead carries a *verifiable pointer
       into the gate output* it is derived from (e.g. the offending marker ids or
       the unmatched count). Such a pointer cannot be fabricated, because this
       module produced the gate output it points at — the model never writes it.
+      Injected concerns are therefore exempt from the grounding check.
 * **Cross-checked.** The reviewer never takes the traceability gates at face
   value. Unknown citation markers and untraceable statistics are injected as
   concerns by this module *deterministically*, so the review cannot silently
@@ -36,6 +40,8 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+from core.quote_grounding import is_quote_grounded
 
 #: Reviewer roles, in priority order. ``reviewer_count`` truncates this tuple.
 REVIEWER_ROLES: tuple[str, ...] = ("methodology", "statistics", "novelty")
@@ -663,8 +669,21 @@ def review_manuscript(
             warnings.append(f"审稿角色 `{role}` 的模型回复无法解析，已跳过：{exc}")
             continue
 
+        # 证据约束：意见的 evidence 必须真的出现在稿件中。仅检查"非空"是不够的，
+        # 模型可以编造一句看起来像原文的话；编造的引用比没有引用更糟。
+        grounded = [
+            concern
+            for concern in report.concerns
+            if is_quote_grounded(concern.evidence, manuscript_body)
+        ]
+        ungrounded = len(report.concerns) - len(grounded)
+        if ungrounded:
+            warnings.append(
+                f"审稿角色 `{role}` 有 {ungrounded} 条意见因证据无法在稿件中找到而被丢弃。"
+            )
+
         # 确定性意见与该审稿人自身的意见合并（去重后保留证据齐全者）。
-        report.concerns = _dedupe_concerns([*report.concerns, *deterministic])
+        report.concerns = _dedupe_concerns([*grounded, *deterministic])
         reports.append(report)
 
     if not reports:
