@@ -200,6 +200,26 @@ def test_every_handoff_carries_data_through_the_whole_chain(
     assert statistics["computed_p_values"], (
         "the statistics gate ran without seeing the computed p-values"
     )
+    # Phase 6: 效应量与样本量也必须随链路到达关口。
+    assert statistics["computed_effect_sizes"], (
+        "the statistics gate ran without seeing the computed effect sizes"
+    )
+    assert statistics["computed_sample_sizes"], (
+        "the statistics gate ran without seeing the computed sample sizes"
+    )
+
+    # --- writing -> manuscript claim integrity gate (Phase 6) ---------------
+    manuscript_claims = json.loads(
+        (base / "writing/manuscript_claim_verification.json.v1").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert manuscript_claims["claim_count"] >= 1, (
+        "the manuscript body's citation pairings never reached the claim gate"
+    )
+    assert (
+        base / "writing/manuscript_claim_verification.md.v1"
+    ).is_file(), "the manuscript claim report was never rendered"
 
     # --- gate results -> manuscript ----------------------------------------
     manuscript = (base / "writing/manuscript.md.v1").read_text(encoding="utf-8")
@@ -232,6 +252,41 @@ def test_state_transitions_reach_export(
     assert state.stage_status[WorkflowStage.SEARCH] == "completed"
     assert state.stage_status[WorkflowStage.WRITING] == "completed"
     assert state.stage_status[WorkflowStage.EXPORT] == "ready_with_author_checks"
+
+
+def test_phase6_gates_land_in_the_real_chain_and_export_still_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 6: 两个新关口走真实链路落盘，且导出全链路不断裂。
+
+    这条测试走的是 `Orchestrator -> ResearchService -> ResearchPipeline`，只伪造
+    外部世界。它证明新关口不是孤立单元：产物真实落盘（存在且非空）、手稿仍可导出
+    为 MD/PDF/PPTX。
+    """
+    orchestrator = _run_user_chain(tmp_path, monkeypatch)
+    base = tmp_path / "projects/e2e/artifacts/writing"
+
+    claim_json = base / "manuscript_claim_verification.json.v1"
+    claim_md = base / "manuscript_claim_verification.md.v1"
+    stats_json = base / "statistics_verification.json.v1"
+    assert claim_json.is_file() and claim_json.stat().st_size > 0
+    assert claim_md.is_file() and claim_md.stat().st_size > 0
+    assert stats_json.is_file() and stats_json.stat().st_size > 0
+
+    # 正文级报告与统计关口都带上了 Phase 6 的新能力。
+    claim_payload = json.loads(claim_json.read_text(encoding="utf-8"))
+    assert claim_payload["claim_count"] >= 1
+    stats_payload = json.loads(stats_json.read_text(encoding="utf-8"))
+    assert stats_payload["computed_effect_sizes"]
+    assert stats_payload["computed_sample_sizes"]
+
+    # 手稿仍可导出为三种格式（新关口绝不阻断导出）。
+    markdown = orchestrator.export("e2e", "md")
+    assert markdown.is_file() and markdown.stat().st_size > 0
+    pdf = orchestrator.export("e2e", "pdf")
+    assert pdf.read_bytes()[:4] == b"%PDF"
+    pptx = orchestrator.export("e2e", "pptx")
+    assert pptx.read_bytes()[:2] == b"PK"
 
 
 def test_all_three_export_formats_produce_valid_files(

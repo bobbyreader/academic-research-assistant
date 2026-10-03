@@ -302,6 +302,38 @@ def test_pipeline_with_dataset_produces_statistics_figures_and_traceability(
     )
     assert verification["passed"] is True
     assert verification["computed_p_values"], "computed p-values must be recorded"
+    # Phase 6 的新能力必须真的生效，而不只是签名换了：统计关口现在同时看效应量与
+    # 样本量，产物里必须能看到这两类「本次分析产生」的数值。
+    assert verification["computed_effect_sizes"], (
+        "the statistics gate must record the computed effect size, not just p-values"
+    )
+    assert verification["computed_sample_sizes"] == [10], (
+        "the statistics gate must record the computed sample sizes, not just p-values"
+    )
+    # 标称的检验名/效应量名与 analysis/statistics_report.json 一致，证明这些数值
+    # 确实来自本次分析而非签名更换后的空转。
+    assert stats["tests"][0]["n"] == 10
+    assert (
+        stats["tests"][0]["effect_size"]
+        in verification["computed_effect_sizes"]
+    )
+
+    # 正文级论断核验（Phase 6）：产物必须真实落盘且非空。
+    manuscript_claims_path = artifacts / "writing/manuscript_claim_verification.json.v1"
+    assert manuscript_claims_path.is_file()
+    manuscript_claims = json.loads(manuscript_claims_path.read_text(encoding="utf-8"))
+    assert manuscript_claims["claim_count"] >= 1
+    assert set(manuscript_claims) >= {
+        "passed",
+        "claim_count",
+        "unsupported_count",
+        "claims_without_evidence_count",
+        "warnings",
+        "author_checks",
+        "claims",
+    }
+    manuscript_claims_md = artifacts / "writing/manuscript_claim_verification.md.v1"
+    assert manuscript_claims_md.is_file() and manuscript_claims_md.stat().st_size > 0
 
 
 def test_two_fresh_runs_produce_byte_identical_artifacts(tmp_path: Path) -> None:
@@ -385,6 +417,277 @@ def test_pipeline_flags_invented_p_value_when_dataset_present(tmp_path: Path) ->
     assert verification["passed"] is False
     assert verification["unmatched_count"] == 1
     assert any("统计陈述" in warning for warning in result.warnings)
+
+
+def test_pipeline_flags_invented_effect_size_and_sample_size(tmp_path: Path) -> None:
+    """Phase 6: 效应量与样本量也要可追溯——伪造的 d 与 n 必须被标为未匹配。
+
+    这证明统计关口的新能力真的生效（不只是签名换了）：正文声称 d=1.2、n=500，
+    而本次分析只产生 d≈-3.16、n=10。关口必须报告 kind 为 effect_size / sample_size
+    的 unmatched 陈述，并产生 warning，**但绝不阻断运行**。
+    """
+    data = tmp_path / "data.csv"
+    data.write_text(
+        "group,score\nA,1\nA,2\nA,3\nA,4\nA,5\nB,6\nB,7\nB,8\nB,9\nB,10\n",
+        encoding="utf-8",
+    )
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(
+            body=(
+                "# Draft\n\n"
+                "The effect was large [P1] (Cohen's d = 1.2), n = 500.\n"
+            )
+        ),
+        doi_resolver=FakeResolver(),
+    )
+
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="invented_stats",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+            data_path=data,
+        )
+    )
+
+    # 顾问级：运行完成、手稿产出，绝不阻断。
+    assert result.manuscript_path.exists()
+
+    verification = json.loads(
+        (
+            tmp_path
+            / "projects/invented_stats/artifacts/writing/statistics_verification.json.v1"
+        ).read_text(encoding="utf-8")
+    )
+    assert verification["passed"] is False
+    kinds = {claim["kind"] for claim in verification["claims"]}
+    assert "effect_size" in kinds, "a fabricated effect size must be extracted"
+    assert "sample_size" in kinds, "a fabricated sample size must be extracted"
+    unmatched_kinds = {
+        claim["kind"] for claim in verification["claims"] if not claim["matched"]
+    }
+    assert {"effect_size", "sample_size"} <= unmatched_kinds
+    assert any("统计陈述" in warning for warning in result.warnings)
+
+
+def test_manuscript_claim_gate_flags_citation_that_does_not_support(tmp_path: Path) -> None:
+    """Phase 6: 正文里「句子—被引文献」配对缺乏摘要支持时，报告该配对不为
+    supports 并产生 warning，**绝不阻断运行**。
+    """
+    class UnrelatedCitationLLM(FakeLLM):
+        def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+            if "事实核查员" in system_prompt:
+                return {
+                    "verdicts": [
+                        {
+                            "claim_index": 0,
+                            "claim": "A difference was observed [P1]",
+                            "citation_id": "P1",
+                            "verdict": "unsupported",
+                            "quote": "A finding.",
+                            "rationale": "摘要与被引句子的主张无关。",
+                        }
+                    ]
+                }
+            return super().complete_json(system_prompt, user_prompt)
+
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=UnrelatedCitationLLM(
+            body="# Draft\n\nA difference was observed [P1].\n"
+        ),
+        doi_resolver=FakeResolver(),
+    )
+
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="unrelated",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+
+    # 顾问级：运行完成、手稿产出。
+    assert result.manuscript_path.exists()
+
+    payload = json.loads(
+        (
+            tmp_path
+            / "projects/unrelated/artifacts/writing/manuscript_claim_verification.json.v1"
+        ).read_text(encoding="utf-8")
+    )
+    assert payload["claim_count"] >= 1
+    verdicts = [
+        evidence["verdict"]
+        for claim in payload["claims"]
+        for evidence in claim["evidence"]
+    ]
+    assert verdicts, "the manuscript gate must judge at least one pairing"
+    assert all(verdict != "supports" for verdict in verdicts)
+    assert any("正文级论断核验" in warning for warning in result.warnings)
+
+
+def test_manuscript_claim_gate_makes_no_extra_model_call_without_markers(
+    tmp_path: Path,
+) -> None:
+    """Phase 6: 正文没有引用标识时，正文级核验贡献 **0** 次模型调用。
+
+    成本可预期是硬要求。这里用「有标识 vs 无标识」两次运行的**差值**来隔离正文级
+    关口的贡献：同一条链路其它阶段（分析、论断级核验）调用次数相同，因此差值恰好
+    等于正文级核验的调用次数。
+    """
+
+    class CountingLLM(FakeLLM):
+        def __init__(self, body: str) -> None:
+            super().__init__(body=body)
+            self.complete_json_calls = 0
+
+        def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+            self.complete_json_calls += 1
+            return super().complete_json(system_prompt, user_prompt)
+
+    def run_with(project_name: str, body: str) -> tuple[int, Path]:
+        llm = CountingLLM(body=body)
+        pipeline = ResearchPipeline(
+            ArtifactStore(tmp_path / "projects"),
+            searcher=FakeSearcher(),
+            llm_client=llm,
+            doi_resolver=FakeResolver(),
+            reviewer_count=0,
+        )
+        pipeline.run(
+            ResearchPipelineConfig(
+                project_name=project_name,
+                topic="climate adaptation",
+                sources=["crossref"],
+                max_results=2,
+            )
+        )
+        return llm.complete_json_calls, (
+            tmp_path / f"projects/{project_name}/artifacts/writing"
+        )
+
+    without_markers, no_marker_dir = run_with(
+        "nomarkers", "# Draft\n\nNo citation markers here at all.\n"
+    )
+    with_markers, _ = run_with(
+        "withmarkers", "# Draft\n\nA difference was observed [P1].\n"
+    )
+
+    # 有标识恰好一次正文级调用；无标识 0 次 → 差值恰为 1。
+    assert with_markers - without_markers == 1, (
+        "the manuscript gate must make exactly one model call when markers are "
+        f"present and none when absent (delta={with_markers - without_markers})"
+    )
+
+    payload = json.loads(
+        (no_marker_dir / "manuscript_claim_verification.json.v1").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["claims"] == []
+    assert payload["passed"] is True
+    assert payload["warnings"], "no-marker runs must explain that nothing was checked"
+    # 产物仍然落盘（resume 依赖它作为 writing 完成的证据）。
+    assert (no_marker_dir / "manuscript_claim_verification.md.v1").is_file()
+
+
+def test_manuscript_claim_gate_failure_is_advisory_and_never_blocks(tmp_path: Path) -> None:
+    """Phase 6: 正文级核验抛异常时必须转为 warning 并继续，绝不阻断运行。
+
+    两层防线都验证：
+    1. 关口内部（`verify_claims`）把模型失败降级为 unclear + warning；
+    2. 管线层（`_run_manuscript_claim_verification` 的 try/except）兜住任何从关口
+       逃逸的异常，转为 warning。这里直接把关口替换成会抛异常的实现来触发第 2 层。
+    """
+    from core import research_pipeline as rp
+
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("manuscript gate model unavailable")
+
+    original = rp.verify_manuscript_claims
+    rp.verify_manuscript_claims = boom  # type: ignore[assignment]
+    try:
+        pipeline = ResearchPipeline(
+            ArtifactStore(tmp_path / "projects"),
+            searcher=FakeSearcher(),
+            llm_client=FakeLLM(body="# Draft\n\nA difference was observed [P1].\n"),
+            doi_resolver=FakeResolver(),
+        )
+        result = pipeline.run(
+            ResearchPipelineConfig(
+                project_name="gateboom",
+                topic="climate adaptation",
+                sources=["crossref"],
+                max_results=2,
+            )
+        )
+    finally:
+        rp.verify_manuscript_claims = original  # type: ignore[assignment]
+
+    # 运行完成、手稿产出，且 warning 中有说明。
+    assert result.manuscript_path.exists()
+    assert any("正文级论断核验未执行" in warning for warning in result.warnings)
+    # 关口失败时仍不留残缺产物：json/md 均未落盘。
+    writing = tmp_path / "projects/gateboom/artifacts/writing"
+    assert not (writing / "manuscript_claim_verification.json.v1").exists()
+
+
+def test_manuscript_claim_gate_model_failure_degrades_with_warning(
+    tmp_path: Path,
+) -> None:
+    """Phase 6: 模型在正文级核验里报错时，关口内部降级为 unclear + warning，
+    运行照常完成、产物照常落盘。"""
+
+    class ExplodingManuscriptGateLLM(FakeLLM):
+        def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+            # 正文级核验与论断级核验共用「事实核查员」提示词；只要 user_prompt
+            # 呈现的是「句子—被引文献」配对（正文级），就让它失败。
+            if "事实核查员" in system_prompt and "待核验句子" in user_prompt:
+                raise RuntimeError("manuscript gate model unavailable")
+            if "事实核查员" in system_prompt:
+                raise RuntimeError("manuscript gate model unavailable")
+            return super().complete_json(system_prompt, user_prompt)
+
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=ExplodingManuscriptGateLLM(
+            body="# Draft\n\nA difference was observed [P1].\n"
+        ),
+        doi_resolver=FakeResolver(),
+    )
+
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="gatedegrade",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+
+    assert result.manuscript_path.exists()
+    assert any(
+        "论断证据核验的模型调用失败" in warning for warning in result.warnings
+    )
+    payload = json.loads(
+        (
+            tmp_path
+            / "projects/gatedegrade/artifacts/writing/manuscript_claim_verification.json.v1"
+        ).read_text(encoding="utf-8")
+    )
+    verdicts = [
+        evidence["verdict"]
+        for claim in payload["claims"]
+        for evidence in claim["evidence"]
+    ]
+    assert verdicts and all(verdict == "unclear" for verdict in verdicts)
 
 
 def test_pipeline_runs_advisory_peer_review(tmp_path: Path) -> None:

@@ -26,6 +26,10 @@ from core.figure_builder import (
     build_figures,
 )
 from core.llm_client import LLMClient
+from core.manuscript_verifier import (
+    render_manuscript_claim_markdown,
+    verify_manuscript_claims,
+)
 from core.peer_reviewer import PeerReviewBundle, PeerReviewError, review_manuscript
 from core.research_models import PaperRecord, SearchReport
 from core.resume import ResumeDecision, describe_reuse
@@ -283,6 +287,7 @@ class ResearchPipeline:
                     body,
                     verification,
                     stats_verification,
+                    _,
                     manuscript,
                 ) = self._rehydrate_writing(config.project_name, dataset)
             except Exception as exc:  # noqa: BLE001 - 重水化失败必须回退到执行
@@ -291,12 +296,13 @@ class ResearchPipeline:
                         "writing", "writing/manuscript.md", exc
                     )
                 )
-                body, verification, stats_verification, manuscript = (
-                    None,
-                    None,
-                    None,
-                    None,
-                )
+                (
+                    body,
+                    verification,
+                    stats_verification,
+                    _,
+                    manuscript,
+                ) = (None, None, None, None, None)
             else:
                 writing_rehydrated = True
                 mark_reused("writing")
@@ -339,7 +345,7 @@ class ResearchPipeline:
             stats_verification = None
             if dataset.statistics is not None:
                 stats_verification = verify_statistics(
-                    body, [test.p_value for test in dataset.statistics.tests]
+                    body, dataset.statistics.tests
                 )
                 artifacts.extend(
                     [
@@ -357,6 +363,20 @@ class ResearchPipeline:
                         ),
                     ]
                 )
+
+            # 正文级论断核验（顾问级）：把模型**正文**里的「句子—被引文献」配对
+            # 送进语义核验。注意必须传 `body` 而不是 `manuscript`——装配后的手稿含
+            # 系统附加的 `## References` 章节，其每一行都是 `[P1] 作者. 标题. …`
+            # 形态，会被误判为「引用句子」，既污染核验又多花一次模型调用。
+            # 报告对象本身无需在此保留：其产物已落盘，续跑时由 `_rehydrate_writing`
+            # 从 `manuscript_claim_verification.json` 重建。
+            _, manuscript_claim_artifacts, manuscript_claim_warnings = (
+                self._run_manuscript_claim_verification(
+                    config.project_name, body, report.papers
+                )
+            )
+            artifacts.extend(manuscript_claim_artifacts)
+            claim_warnings.extend(manuscript_claim_warnings)
 
             manuscript = self._assemble_manuscript(body, report.papers, dataset)
 
@@ -728,13 +748,13 @@ class ResearchPipeline:
 
     def _rehydrate_writing(
         self, project_name: str, dataset: DatasetAnalysis
-    ) -> tuple[str, CitationVerificationReport, Any, str]:
-        """`writing` 阶段：重建正文、引用核验、统计核验与完整手稿。
+    ) -> tuple[str, CitationVerificationReport, Any, ClaimVerificationReport, str]:
+        """`writing` 阶段：重建正文、引用核验、统计核验、正文论断核验与完整手稿。
 
         手稿产物本身就是“系统附加段落之后”的最终交付物，因此直接作为评测与评审
         的输入：这样传给同行评审的内容与全新运行**逐字节一致**，不会因为重新拼装
-        而引入差异。正文 `body` 在续跑路径上不再被使用（统计核验与引用核验均来自
-        既有产物），故与手稿同值仅作占位。
+        而引入差异。正文 `body` 在续跑路径上不再被使用（统计核验、引用核验与正文
+        论断核验均来自既有产物），故与手稿同值仅作占位。
         """
         manuscript = self._require_artifact(
             project_name, "writing", "manuscript.md"
@@ -752,7 +772,20 @@ class ResearchPipeline:
             raw = json.loads(stats_path.read_text(encoding="utf-8"))
             stats_verification = self._statistics_verification_from_dict(raw)
 
-        return manuscript, verification, stats_verification, manuscript
+        # 正文级论断核验产物是 `writing` 阶段可以复用的前提（见 `core/resume.py`），
+        # 因此此处缺失即视为产物不完整并抛错，由 `run()` 回退为重新执行 writing。
+        claim_payload = self._read_json_artifact(
+            project_name, "writing", "manuscript_claim_verification.json"
+        )
+        manuscript_claim_verification = ClaimVerificationReport.from_dict(claim_payload)
+
+        return (
+            manuscript,
+            verification,
+            stats_verification,
+            manuscript_claim_verification,
+            manuscript,
+        )
 
     @staticmethod
     def _citation_report_from_dict(payload: object) -> CitationVerificationReport:
@@ -1015,6 +1048,53 @@ class ResearchPipeline:
             warnings.append(
                 "论断—证据核验发现未被引用文献支持或缺乏引用的论断"
                 "（顾问级提示，未阻断）；请核对 claim_evidence_verification.md。"
+            )
+        return report, artifacts, warnings
+
+    def _run_manuscript_claim_verification(
+        self,
+        project_name: str,
+        body: str,
+        papers: list[PaperRecord],
+    ) -> tuple[ClaimVerificationReport | None, list[Path], list[str]]:
+        """Send each (sentence, cited paper) pairing in the manuscript body to the
+        semantic claim verifier.
+
+        Advisory by design, and **always** produces an artifact: the report is
+        written even when the body has no citation markers (an empty report), so a
+        resumed run can treat its presence as proof that the writing stage finished
+        (see `core.resume._writing_complete`). A failure inside this gate is itself
+        downgraded to a warning — an advisory gate must never break a run.
+
+        ``body`` is the model's raw draft, *not* the assembled manuscript: the
+        system-appended ``## References`` section is a list of ``[P1] Author…``
+        lines that would otherwise be misread as citation sentences.
+        """
+        try:
+            report = verify_manuscript_claims(self.llm_client, body, papers)
+        except Exception as exc:  # noqa: BLE001 - advisory gate must never break a run
+            return None, [], [f"正文级论断核验未执行: {exc}"]
+
+        artifacts = [
+            self._save_json(
+                project_name,
+                "writing",
+                "manuscript_claim_verification.json",
+                report.to_dict(),
+            ),
+            self.artifact_store.save_artifact(
+                project_name,
+                "writing",
+                "manuscript_claim_verification.md",
+                render_manuscript_claim_markdown(report),
+            ),
+        ]
+
+        warnings = list(report.warnings)
+        if not report.passed:
+            warnings.append(
+                "正文级论断核验发现部分「句子—被引文献」配对缺乏摘要支持"
+                "（顾问级提示，未阻断）；请核对 manuscript_claim_verification.md。"
             )
         return report, artifacts, warnings
 

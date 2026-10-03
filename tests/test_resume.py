@@ -115,6 +115,21 @@ def _write_complete_artifacts(store: ArtifactStore, project: str = "p") -> None:
     store.save_artifact(
         project, "writing", "claim_evidence_verification.md", "claim body"
     )
+    # Phase 6 新增的正文级论断核验产物。`_writing_complete` 无条件要求它存在：
+    # 该关口始终产出报告（正文没有引用标识时也产出一份 claims 为空的报告），
+    # 因此"缺失"就等于"writing 阶段没完成"。
+    store.save_artifact(
+        project,
+        "writing",
+        "manuscript_claim_verification.json",
+        json.dumps({"passed": True, "claims": []}),
+    )
+    store.save_artifact(
+        project,
+        "writing",
+        "manuscript_claim_verification.md",
+        "manuscript claim body",
+    )
     store.save_artifact(
         project, "communication", "presentation_outline.md", "outline body"
     )

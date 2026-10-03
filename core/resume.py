@@ -480,6 +480,25 @@ def _writing_complete(store: ArtifactStore, project_name: str) -> tuple[bool, st
         store, project_name, "writing", "citation_verification.md"
     ):
         return False, "缺少 writing/citation_verification.md，需重新撰写并复核引用。"
+    # 正文级论断核验（Phase 6）。该关口**始终**产出产物（正文没有引用标识时
+    # 也产出一份 claims 为空的报告），因此这里无条件要求它存在。
+    #
+    # 代价：Phase 6 之前的项目缺少该产物，writing 阶段会重跑一次。这是刻意的
+    # 方向选择——宁可多跑一个阶段，也不能让续跑**静默跳过一个关口**。
+    if not isinstance(
+        _json_artifact(
+            store, project_name, "writing", "manuscript_claim_verification.json"
+        ),
+        dict,
+    ):
+        return False, (
+            "缺少 writing/manuscript_claim_verification.json，"
+            "正文级论断核验没有留下记录，需重新撰写。"
+        )
+    if not _nonempty_artifact(
+        store, project_name, "writing", "manuscript_claim_verification.md"
+    ):
+        return False, "缺少 writing/manuscript_claim_verification.md，需重新撰写。"
     if not _nonempty_artifact(
         store, project_name, "communication", "presentation_outline.md"
     ):
