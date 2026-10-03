@@ -11,6 +11,7 @@ from core.external_clients import PaperRecord, SearchReport
 from core.llm_client import build_llm_client
 from core.research_pipeline import (
     ResearchPipeline,
+    ResearchPipelineCancelled,
     ResearchPipelineConfig,
     ResearchPipelineError,
 )
@@ -961,3 +962,429 @@ def test_build_llm_client_honours_timeout_for_every_provider(tmp_path: Path) -> 
             provider=provider, api_key="test-key", timeout=42, workspace_dir=tmp_path
         )
         assert client.settings.timeout == 42, provider
+
+
+# --------------------------------------------------------------------------- #
+# P5.6 任务 1：协作式取消（阶段边界生效）
+# --------------------------------------------------------------------------- #
+
+#: 含引用标识的正文：让正文级论断核验真的发起一次模型调用（否则调用次数会因
+#: 正文有无 [P1] 而不同，掩盖"用量统计是否改变调用次数"的判定）。
+BODY = "# Draft\n\nA difference was observed [P1].\n"
+
+
+class CountingSearcher(FakeSearcher):
+    """记录 `search()` 被调用的次数，用于断言阶段是否被进入。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def search(
+        self, query: str, sources: list[str], max_results: int
+    ) -> SearchReport:
+        self.calls += 1
+        return super().search(query, sources, max_results)
+
+
+class CountingLLM(FakeLLM):
+    """记录模型调用次数，用于断言取消/用量统计不改变调用次数。"""
+
+    def __init__(self, body: str = BODY) -> None:
+        super().__init__(body=body)
+        self.complete_calls = 0
+        self.complete_json_calls = 0
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        self.complete_calls += 1
+        return super().complete(system_prompt, user_prompt)
+
+    def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+        self.complete_json_calls += 1
+        return super().complete_json(system_prompt, user_prompt)
+
+
+def test_should_continue_false_stops_before_analysis(tmp_path: Path) -> None:
+    """`should_continue` 返回 False → 抛 `ResearchPipelineCancelled`。
+
+    取消在**阶段边界**生效：这里让它恰好在 search 边界后返回 False，于是 search
+    已经跑完（并落盘），但 analysis 阶段**绝不被进入**——用计数桩证明模型调用为 0。
+    """
+    searcher = CountingSearcher()
+    llm = CountingLLM()
+    calls = {"n": 0}
+
+    def should_continue() -> bool:
+        # 第一次边界（search 之前）放行；第二次边界（analysis 之前）取消。
+        calls["n"] += 1
+        return calls["n"] < 2
+
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=searcher,
+        llm_client=llm,
+        doi_resolver=FakeResolver(),
+        should_continue=should_continue,
+    )
+
+    with pytest.raises(ResearchPipelineCancelled):
+        pipeline.run(
+            ResearchPipelineConfig(
+                project_name="cancel1",
+                topic="climate adaptation",
+                sources=["crossref"],
+                max_results=2,
+            )
+        )
+
+    assert searcher.calls == 1, "search 阶段应已执行"
+    assert llm.complete_json_calls == 0, "取消后不得进入 analysis（0 次模型调用）"
+    assert llm.complete_calls == 0, "取消后不得进入 writing"
+    # 取消不留下半成品：已完成的 search 阶段产物仍在磁盘上。
+    literature = tmp_path / "projects/cancel1/artifacts/search/literature.json.v1"
+    assert literature.is_file()
+    # 未进入的阶段没有产物。
+    assert not (tmp_path / "projects/cancel1/artifacts/analysis").exists()
+
+
+def test_cancellation_is_observable_through_service_as_cancelled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """服务层：取消时状态为 `"cancelled"` 而非 `"blocked"`，并原样重新抛出。
+
+    取消是用户**主动行为**，不是错误——把它记成 `blocked` 会让用户以为运行失败。
+    """
+    monkeypatch.setenv("ARS_LLM_PROVIDER", "codex_cli")
+    projects_dir = tmp_path / "projects"
+    state_manager = StateManager(projects_dir)
+    state_manager.save(
+        ProjectState(
+            name="cancel-svc",
+            mode="hybrid",
+            current_stage=WorkflowStage.BRAINSTORMING,
+        )
+    )
+    service = ResearchService(projects_dir, state_manager, ArtifactStore(projects_dir))
+
+    # 第一次边界放行，之后取消：运行会在 search 阶段内继续（search 无法取消），
+    # 但在进入 analysis 前停止。
+    calls = {"n": 0}
+
+    def should_continue() -> bool:
+        calls["n"] += 1
+        return calls["n"] < 2
+
+    # 用假管线替代真实管线，避免真实外部调用；只验证服务层的取消处理契约。
+    from core import research_service as rs
+
+    class StubPipeline:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            assert kwargs.get("should_continue") is should_continue
+
+        def run(self, config: object) -> object:
+            raise ResearchPipelineCancelled("cancelled at boundary")
+
+    monkeypatch.setattr(rs, "ResearchPipeline", StubPipeline)
+
+    with pytest.raises(ResearchPipelineCancelled):
+        service.run(
+            "cancel-svc",
+            "a topic",
+            sources=["crossref"],
+            max_results=1,
+            should_continue=should_continue,
+        )
+
+    state = state_manager.load("cancel-svc")
+    assert state is not None
+    assert state.stage_status[WorkflowStage.SEARCH] == "cancelled"
+    assert state.stage_status[WorkflowStage.SEARCH] != "blocked"
+
+
+def test_cancellation_does_not_block_resume_of_completed_prefix(
+    tmp_path: Path,
+) -> None:
+    """取消绝不阻断续跑：取消 → 再次运行 → 前段被复用。
+
+    取消发生在阶段边界，已完成的阶段产物完整且可复用。第二次运行时 search 阶段
+    必须被复用（`reused_steps` 含 "search"），且外部检索调用数为 0。
+    """
+    from core.resume import RunFingerprint, plan_resume
+    from core.state_manager import WorkflowStage as _WS  # noqa: F401
+
+    store = ArtifactStore(tmp_path / "projects")
+    searcher = CountingSearcher()
+
+    # 第一次运行：在 search 之后取消。
+    calls = {"n": 0}
+
+    def stop_after_search() -> bool:
+        calls["n"] += 1
+        return calls["n"] < 2
+
+    first = ResearchPipeline(
+        store,
+        searcher=searcher,
+        llm_client=CountingLLM(),
+        doi_resolver=FakeResolver(),
+        should_continue=stop_after_search,
+    )
+    with pytest.raises(ResearchPipelineCancelled):
+        first.run(
+            ResearchPipelineConfig(
+                project_name="resume-cancel",
+                topic="climate adaptation",
+                sources=["crossref"],
+                max_results=2,
+            )
+        )
+    assert searcher.calls == 1
+
+    # 第二次运行：复用已完成的 search 阶段（指纹一致、产物齐备）。
+    fingerprint = RunFingerprint.build(
+        topic="climate adaptation",
+        sources=["crossref"],
+        max_results=2,
+        data_path=None,
+        reviewer_count=1,
+        figure_dpi=300,
+    )
+    decision = plan_resume(
+        artifact_store=store,
+        project_name="resume-cancel",
+        fingerprint=fingerprint,
+        previous_steps={"search": fingerprint},
+        enabled=True,
+    )
+    assert decision.can_skip("search"), "取消后 search 产物应可复用"
+
+    llm2 = CountingLLM()
+    second = ResearchPipeline(
+        store,
+        searcher=searcher,
+        llm_client=llm2,
+        doi_resolver=FakeResolver(),
+        resume=decision,
+    )
+    result = second.run(
+        ResearchPipelineConfig(
+            project_name="resume-cancel",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+
+    assert "search" in result.reused_steps
+    assert searcher.calls == 1, "复用 search 阶段不得新增外部检索调用"
+    # 前段复用后，后续阶段从未产出；本次运行把它们补齐。
+    assert result.manuscript_path.exists()
+
+
+# --------------------------------------------------------------------------- #
+# P5.6 任务 2：用量落盘（成功与取消两条路径）
+# --------------------------------------------------------------------------- #
+
+
+class _FakeUsageReport:
+    """最小化的 `UsageReport` 鸭子类型：只提供管线会读取的三个方法。"""
+
+    def __init__(self, note: str, warnings: list[str], payload: dict) -> None:
+        self._note = note
+        self._warnings = warnings
+        self._payload = payload
+
+    def note(self) -> str:
+        return self._note
+
+    def warnings(self) -> list[str]:
+        return list(self._warnings)
+
+    def to_dict(self) -> dict:
+        return dict(self._payload)
+
+
+class UsageTrackingFakeLLM(CountingLLM):
+    """在完整转发的同时暴露一个 `report` 属性，模拟 UsageTrackingClient。"""
+
+    def __init__(self, report: _FakeUsageReport, body: str = BODY) -> None:
+        super().__init__(body=body)
+        self.report = report
+
+
+def _usage_report() -> _FakeUsageReport:
+    return _FakeUsageReport(
+        note="本次运行共 3 次模型调用，2 次上报用量（prompt=10, completion=5, total=15）。",
+        warnings=["1 次调用未上报用量，已如实标注，未做估算。"],
+        # `records` 才是逐次调用明细（`calls` 是计数，是整数）。
+        payload={
+            "calls": 3,
+            "records": [
+                {"operation": "complete_json", "reported": True, "total_tokens": 15},
+                {"operation": "complete", "reported": True, "total_tokens": 12},
+                {"operation": "complete_json", "reported": False, "total_tokens": None},
+            ],
+        },
+    )
+
+
+def test_usage_report_is_persisted_on_success(tmp_path: Path) -> None:
+    """成功路径：用量落盘为 artifacts/run/usage_report.json 与 .md，且注意一致。"""
+    report = _usage_report()
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=CountingSearcher(),
+        llm_client=UsageTrackingFakeLLM(report),
+        doi_resolver=FakeResolver(),
+    )
+
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="usage-ok",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+
+    run_dir = tmp_path / "projects/usage-ok/artifacts/run"
+    assert (run_dir / "usage_report.json.v1").is_file()
+    assert (run_dir / "usage_report.md.v1").is_file()
+    payload = json.loads((run_dir / "usage_report.json.v1").read_text(encoding="utf-8"))
+    assert payload == report.to_dict()
+    markdown = (run_dir / "usage_report.md.v1").read_text(encoding="utf-8")
+    assert report.note() in markdown
+    # 逐次调用明细必须来自 `records` 列表（`calls` 是整数计数，不是列表）。
+    assert "## 逐次调用明细" in markdown
+    assert "operation=complete_json" in markdown
+    # **不得静默跳过**：marginal 明细条数必须等于 records 条数。若将来键名再漂移
+    # （例如退回读 `calls`），这里会失败，而不是悄悄少写一大块内容。
+    detail_lines = [
+        line for line in markdown.splitlines() if line.startswith("- 调用 ")
+    ]
+    assert len(detail_lines) == len(report.to_dict()["records"]), (
+        f"逐次明细条数({len(detail_lines)})！= records 条数"
+        f"({len(report.to_dict()['records'])})：markdown 静默丢数据"
+    )
+    # `usage_note` 必须与 `UsageReport.note()` 逐字一致（绝不加工）。
+    assert result.usage_note == report.note()
+    # 用量的 warnings 透传进结果 warnings。
+    assert any("未上报用量" in warning for warning in result.warnings)
+
+
+def test_usage_report_is_persisted_on_cancellation(tmp_path: Path) -> None:
+    """取消路径：用量同样落盘——部分运行的用量是一笔真实开销，不能丢。"""
+    report = _usage_report()
+    llm = UsageTrackingFakeLLM(report)
+    calls = {"n": 0}
+
+    def stop_after_search() -> bool:
+        calls["n"] += 1
+        return calls["n"] < 2
+
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=CountingSearcher(),
+        llm_client=llm,
+        doi_resolver=FakeResolver(),
+        should_continue=stop_after_search,
+    )
+
+    with pytest.raises(ResearchPipelineCancelled):
+        pipeline.run(
+            ResearchPipelineConfig(
+                project_name="usage-cancel",
+                topic="climate adaptation",
+                sources=["crossref"],
+                max_results=2,
+            )
+        )
+
+    run_dir = tmp_path / "projects/usage-cancel/artifacts/run"
+    assert (run_dir / "usage_report.json.v1").is_file(), (
+        "取消路径也必须落盘用量"
+    )
+    assert (run_dir / "usage_report.md.v1").is_file()
+    payload = json.loads((run_dir / "usage_report.json.v1").read_text(encoding="utf-8"))
+    assert payload == report.to_dict()
+
+
+def test_usage_tracking_does_not_change_model_call_counts(tmp_path: Path) -> None:
+    """用量统计是**纯观测**：包不包装，模型调用次数必须完全一致。"""
+    def run_with(project_name: str, client: object) -> tuple[int, int]:
+        pipeline = ResearchPipeline(
+            ArtifactStore(tmp_path / "projects"),
+            searcher=CountingSearcher(),
+            llm_client=client,  # type: ignore[arg-type]
+            doi_resolver=FakeResolver(),
+        )
+        pipeline.run(
+            ResearchPipelineConfig(
+                project_name=project_name,
+                topic="climate adaptation",
+                sources=["crossref"],
+                max_results=2,
+            )
+        )
+        counted = client
+        assert isinstance(counted, CountingLLM)
+        return counted.complete_calls, counted.complete_json_calls
+
+    plain = CountingLLM()
+    plain_counts = run_with("count-plain", plain)
+
+    tracked = UsageTrackingFakeLLM(_usage_report())
+    tracked_counts = run_with("count-tracked", tracked)
+
+    assert plain_counts == tracked_counts, (
+        "用量统计改变了模型调用次数："
+        f"plain={plain_counts} tracked={tracked_counts}"
+    )
+
+
+def test_malformed_usage_records_are_not_silently_skipped(tmp_path: Path) -> None:
+    """`records` 存在但不是列表 → 视作**结构异常**，显式失败而非静默降级。
+
+    这直接对应"绝不静默丢弃"的项目标准：把结构损坏当成"没有明细"悄悄吞掉，会让
+    产物看起来正常却少了一大块内容。渲染器必须在落盘阶段就暴露问题。
+    """
+    broken = _FakeUsageReport(
+        note="用量摘要",
+        warnings=[],
+        payload={"calls": 1, "records": "not-a-list"},
+    )
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=CountingSearcher(),
+        llm_client=UsageTrackingFakeLLM(broken),
+        doi_resolver=FakeResolver(),
+    )
+
+    with pytest.raises(ResearchPipelineError, match="records"):
+        pipeline.run(
+            ResearchPipelineConfig(
+                project_name="usage-broken",
+                topic="climate adaptation",
+                sources=["crossref"],
+                max_results=2,
+            )
+        )
+
+
+def test_no_usage_report_is_silent_and_behavior_unchanged(tmp_path: Path) -> None:
+    """无 `report`（裸客户端）时：不落盘用量、`usage_note` 为空、行为不变。"""
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=CountingSearcher(),
+        llm_client=FakeLLM(),
+        doi_resolver=FakeResolver(),
+    )
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="nounit",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+    assert result.usage_note == ""
+    assert not (tmp_path / "projects/nounit/artifacts/run").exists()

@@ -9,8 +9,17 @@ const stateNames = {
   pending: "待开始",
   in_progress: "进行中",
   completed: "已完成",
+  cancelled: "已取消",
   failed: "需处理",
   blocked: "需处理",
+};
+
+const statusLabels = {
+  queued: "排队中",
+  running: "进行中",
+  completed: "可以下载",
+  cancelled: "已取消",
+  failed: "任务失败",
 };
 
 const form = document.querySelector("#research-form");
@@ -18,12 +27,17 @@ const startButton = document.querySelector("#start-button");
 const message = document.querySelector("#form-message");
 const resultsPanel = document.querySelector("#results-panel");
 const recentList = document.querySelector("#recent-list");
+const queueList = document.querySelector("#queue-list");
 const statusPill = document.querySelector("#status-pill");
 const progressFooter = document.querySelector("#progress-footer");
 const progressTitle = document.querySelector("#progress-title-text");
+const cancelButton = document.querySelector("#cancel-button");
+const cancelNote = document.querySelector("#cancel-note");
+const usageNote = document.querySelector("#usage-note");
 const wizardPages = [...document.querySelectorAll("[data-step-page]")];
 const wizardSteps = [...document.querySelectorAll("[data-step-target]")];
 let activeStep = 1;
+let activeJobId = null;
 
 function setMessage(text, type = "") {
   message.textContent = text;
@@ -111,10 +125,46 @@ function requestStep(target) {
 }
 
 function setStatus(status) {
-  const labels = { queued: "排队中", running: "进行中", completed: "可以下载", failed: "任务失败" };
-  const className = status === "completed" ? "done" : status === "failed" ? "error" : status === "running" ? "running" : "idle";
+  const className =
+    status === "completed" ? "done"
+    : status === "failed" ? "error"
+    : status === "cancelled" ? "idle"
+    : status === "running" ? "running"
+    : "idle";
   statusPill.className = `status-pill ${className}`;
-  statusPill.textContent = labels[status] || "等待开始";
+  statusPill.textContent = statusLabels[status] || "等待开始";
+}
+
+function setUsageNote(note) {
+  // 如实呈现：可能说明"未获得用量"，绝不美化成"本次花费 X"。
+  if (note) {
+    usageNote.textContent = `用量：${note}`;
+    usageNote.classList.remove("hidden");
+  } else {
+    usageNote.textContent = "";
+    usageNote.classList.add("hidden");
+  }
+}
+
+function updateCancelAffordance(snapshot) {
+  const cancellable = snapshot.status === "queued" || snapshot.status === "running";
+  cancelButton.classList.toggle("hidden", !cancellable);
+  cancelButton.disabled = false;
+  cancelButton.querySelector("span").textContent = "取消本次研究";
+  cancelNote.classList.toggle("hidden", !cancellable);
+  if (snapshot.status === "running" && snapshot.cancel_requested) {
+    cancelButton.disabled = true;
+    cancelButton.querySelector("span").textContent = "已请求取消…";
+    cancelNote.textContent =
+      "已请求取消：当前阶段会先跑完，随后在阶段边界停止。已产出的产物会保留，下次运行可续跑。";
+    cancelNote.classList.remove("hidden");
+  } else if (snapshot.status === "queued" && snapshot.cancel_requested) {
+    cancelButton.disabled = true;
+    cancelButton.querySelector("span").textContent = "已请求取消…";
+  } else if (cancellable) {
+    cancelNote.textContent =
+      "取消不会立即中断：当前阶段会先跑完，再在阶段边界停止。已产出的产物会保留，下次运行可续跑。";
+  }
 }
 
 function updateProgress(snapshot) {
@@ -125,8 +175,10 @@ function updateProgress(snapshot) {
     item.dataset.status = stage.status;
     item.querySelector(".stage-state").textContent = stateNames[stage.status] || stage.status;
   });
+  setUsageNote(snapshot.usage_note);
+  updateCancelAffordance(snapshot);
   if (snapshot.status === "queued") {
-    progressFooter.textContent = "任务已创建，正在准备研究引擎。";
+    progressFooter.textContent = "任务已创建，正在排队等待研究引擎。";
     progressTitle.textContent = "正在为这次研究准备文献检索。";
   } else if (snapshot.status === "running") {
     progressFooter.textContent = `当前阶段：${stageNames[snapshot.current_stage] || "研究处理中"}`;
@@ -134,6 +186,10 @@ function updateProgress(snapshot) {
   } else if (snapshot.status === "completed") {
     progressFooter.textContent = "研究已完成，结果已保存到本机。";
     progressTitle.textContent = "研究已完成。你可以下载结果或在最近项目中再次查看。";
+  } else if (snapshot.status === "cancelled") {
+    progressFooter.textContent =
+      "已取消：运行在阶段边界停止，已产出的产物已保留，下次运行可续跑。";
+    progressTitle.textContent = "本次研究已取消。已完成的阶段不会丢失。";
   } else if (snapshot.status === "failed") {
     progressFooter.textContent = snapshot.error || "任务没有完成，请检查设置后重试。";
     progressTitle.textContent = "任务暂停了。修改设置后可以再次启动。";
@@ -173,6 +229,7 @@ function sleep(milliseconds) {
 }
 
 async function pollJob(jobId) {
+  activeJobId = jobId;
   while (true) {
     const response = await fetch(`/api/jobs/${jobId}`);
     const snapshot = await response.json();
@@ -181,6 +238,13 @@ async function pollJob(jobId) {
     if (snapshot.status === "completed") {
       showResults(snapshot);
       setMessage("研究已完成，可以在下方下载结果。", "success");
+      return;
+    }
+    if (snapshot.status === "cancelled") {
+      setMessage(
+        "本次研究已取消。已完成的阶段产物会保留，下次运行可续跑。",
+        "",
+      );
       return;
     }
     if (snapshot.status === "failed") throw new Error(snapshot.error || "研究任务失败");
@@ -219,6 +283,84 @@ form.addEventListener("submit", async (event) => {
     startButton.querySelector("span").textContent = "开始研究";
   }
 });
+
+const queueStatusLabels = {
+  queued: "排队中",
+  running: "进行中",
+  completed: "已完成",
+  cancelled: "已取消",
+  failed: "失败",
+};
+
+function describeQueueEntry(job) {
+  if (job.status === "queued") {
+    if (job.queue_position && job.queue_position > 0) {
+      return `排队中第 ${job.queue_position} 位`;
+    }
+    return "排队中";
+  }
+  if (job.status === "running") {
+    return job.cancel_requested ? "进行中（已请求取消）" : "正在运行";
+  }
+  return queueStatusLabels[job.status] || job.status;
+}
+
+async function loadQueue() {
+  const response = await fetch("/api/jobs");
+  if (!response.ok) return;
+  const payload = await response.json();
+  queueList.replaceChildren();
+  if (!payload.jobs.length) {
+    const empty = document.createElement("li");
+    empty.className = "queue-empty";
+    empty.textContent = "当前没有任务。";
+    queueList.append(empty);
+    return;
+  }
+  payload.jobs.forEach((job) => {
+    const item = document.createElement("li");
+    item.className = "queue-item";
+    if (job.status === "queued") item.classList.add("is-queued");
+    if (job.status === "running") item.classList.add("is-running");
+    const title = document.createElement("strong");
+    title.textContent = job.project_name;
+    const topic = document.createElement("span");
+    topic.className = "queue-topic";
+    topic.textContent = job.topic;
+    const state = document.createElement("em");
+    state.className = "queue-state";
+    state.textContent = describeQueueEntry(job);
+    item.append(title, topic, state);
+
+    if (
+      (job.status === "queued" || job.status === "running") &&
+      !job.cancel_requested
+    ) {
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "queue-cancel";
+      cancel.textContent = "取消";
+      cancel.addEventListener("click", () => cancelJob(job.job_id, cancel));
+      item.append(cancel);
+    }
+    queueList.append(item);
+  });
+}
+
+async function cancelJob(jobId, button) {
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" });
+    const result = await response.json();
+    if (!response.ok) {
+      setMessage(result.error || "无法取消该任务。");
+    }
+  } catch (error) {
+    setMessage(error.message || "取消请求失败，请稍后重试。");
+  } finally {
+    await loadQueue();
+  }
+}
 
 async function loadProjects() {
   const response = await fetch("/api/projects");
@@ -276,8 +418,23 @@ document.querySelector("#refresh-projects").addEventListener("click", async () =
   const button = document.querySelector("#refresh-projects");
   button.disabled = true;
   await loadProjects();
+  await loadQueue();
   button.disabled = false;
 });
 
+cancelButton.addEventListener("click", async () => {
+  if (!activeJobId) return;
+  cancelButton.disabled = true;
+  cancelButton.querySelector("span").textContent = "已请求取消…";
+  cancelNote.textContent =
+    "已请求取消：当前阶段会先跑完，随后在阶段边界停止。已产出的产物会保留，下次运行可续跑。";
+  cancelNote.classList.remove("hidden");
+  await cancelJob(activeJobId, cancelButton);
+});
+
 updateChoiceCards();
+loadQueue();
 loadProjects();
+window.setInterval(() => {
+  if (!activeJobId) loadQueue();
+}, 5000);

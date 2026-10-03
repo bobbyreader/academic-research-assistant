@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import ClassVar
 
+from core.research_pipeline import ResearchPipelineCancelled
 from orchestrator import Orchestrator
-from web_app import DEFAULT_WEB_PORT, create_app
+from web_app import DEFAULT_WEB_PORT, QUEUE_POSITION_RUNNING, create_app
 
 
 def test_web_home_and_health_are_available(tmp_path: Path) -> None:
@@ -451,3 +453,341 @@ def test_job_status_exposes_resume_fields_for_backwards_compatibility(
     # Resume fields exist even when the runner returns no result object.
     assert snapshot["reused_steps"] == []
     assert snapshot["resume_note"] == ""
+    # Usage field exists and honestly defaults to "no usage" (empty), never 0.
+    assert snapshot["usage_note"] == ""
+
+
+# ==========================================================================
+# Queue visibility + cancellation + usage (P5.6)
+# ==========================================================================
+
+
+class _BlockingRunner:
+    """A runner that blocks until released, so jobs pile up in the queue.
+
+    The executor runs one worker at a time, so the first job occupies the single
+    worker (``running``) while every later job stays ``queued`` — exactly the
+    condition ``queue_position`` is meant to describe.
+    """
+
+    def __init__(self, base_dir: Path, release: threading.Event) -> None:
+        self.delegate = Orchestrator(base_dir)
+        self.release = release
+        self.started = threading.Event()
+        self.should_continue_seen: dict[str, object] = {}
+
+    @property
+    def state_manager(self):
+        return self.delegate.state_manager
+
+    def init_project(self, name: str, mode: str) -> None:
+        self.delegate.init_project(name, mode)
+
+    def run_real_research(self, project_name: str, topic: str, **options: object):
+        self.should_continue_seen["value"] = options.get("should_continue")
+        self.started.set()
+        self.release.wait(timeout=5)
+
+        class _Result:
+            reused_steps: ClassVar[list[str]] = []
+            resume_plan: ClassVar[str] = ""
+            resume_note: ClassVar[str] = ""
+            usage_note: ClassVar[str] = "已上报 2 次调用；1 次未获得用量。"
+
+        return _Result()
+
+    def export(self, project_name: str, format: str) -> Path:
+        output = (
+            self.delegate.base_dir
+            / "projects"
+            / project_name
+            / "exports"
+            / f"{project_name}_final.{format}"
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("test export", encoding="utf-8")
+        return output
+
+
+def test_jobs_list_shows_every_job_with_queue_positions(tmp_path: Path) -> None:
+    """GET /api/jobs must show all jobs; queued positions are 1-based, running=0."""
+    release = threading.Event()
+    runner = _BlockingRunner(tmp_path, release)
+    client = create_app(tmp_path, orchestrator_factory=lambda base: runner).test_client()
+
+    first = client.post(
+        "/api/research",
+        json={
+            "topic": "First topic",
+            "project_name": "first_job",
+            "sources": ["crossref"],
+            "exports": ["md"],
+        },
+    ).get_json()["job_id"]
+    # Wait until the first job is actually running (it holds the only worker).
+    assert runner.started.wait(timeout=5)
+
+    second = client.post(
+        "/api/research",
+        json={
+            "topic": "Second topic",
+            "project_name": "second_job",
+            "sources": ["crossref"],
+            "exports": ["md"],
+        },
+    ).get_json()["job_id"]
+    third = client.post(
+        "/api/research",
+        json={
+            "topic": "Third topic",
+            "project_name": "third_job",
+            "sources": ["crossref"],
+            "exports": ["md"],
+        },
+    ).get_json()["job_id"]
+
+    listing = client.get("/api/jobs")
+    assert listing.status_code == 200
+    jobs = {job["job_id"]: job for job in listing.get_json()["jobs"]}
+
+    assert set(jobs) == {first, second, third}, "the list must include every job"
+    assert jobs[first]["status"] == "running"
+    assert jobs[first]["queue_position"] == QUEUE_POSITION_RUNNING
+    # 1-based queue order, in creation order.
+    assert jobs[second]["status"] == "queued"
+    assert jobs[second]["queue_position"] == 1
+    assert jobs[third]["status"] == "queued"
+    assert jobs[third]["queue_position"] == 2
+
+    release.set()
+
+
+def test_cancel_queued_job_is_immediate_and_not_reported_as_failed(
+    tmp_path: Path,
+) -> None:
+    """A queued job cannot have started, so cancellation is immediate."""
+    release = threading.Event()
+    runner = _BlockingRunner(tmp_path, release)
+    client = create_app(tmp_path, orchestrator_factory=lambda base: runner).test_client()
+
+    client.post(
+        "/api/research",
+        json={
+            "topic": "Running topic",
+            "project_name": "running_job",
+            "sources": ["crossref"],
+            "exports": ["md"],
+        },
+    )
+    assert runner.started.wait(timeout=5)
+
+    queued_id = client.post(
+        "/api/research",
+        json={
+            "topic": "Queued topic",
+            "project_name": "queued_job",
+            "sources": ["crossref"],
+            "exports": ["md"],
+        },
+    ).get_json()["job_id"]
+
+    response = client.post(f"/api/jobs/{queued_id}/cancel")
+    assert response.status_code == 202
+
+    snapshot = client.get(f"/api/jobs/{queued_id}").get_json()
+    assert snapshot["status"] == "cancelled", "a queued job is cancelled, not failed"
+
+    release.set()
+
+
+def test_cancel_running_job_sets_flag_and_wakes_should_continue(
+    tmp_path: Path,
+) -> None:
+    """Cancelling a running job must flip the flag the worker's callback reads."""
+    release = threading.Event()
+    runner = _BlockingRunner(tmp_path, release)
+    client = create_app(tmp_path, orchestrator_factory=lambda base: runner).test_client()
+
+    job_id = client.post(
+        "/api/research",
+        json={
+            "topic": "Running topic",
+            "project_name": "running_job",
+            "sources": ["crossref"],
+            "exports": ["md"],
+        },
+    ).get_json()["job_id"]
+    assert runner.started.wait(timeout=5)
+
+    should_continue = runner.should_continue_seen["value"]
+    assert callable(should_continue), "worker must pass should_continue to the runner"
+    assert should_continue() is True, "an uncancelled run must continue"
+
+    response = client.post(f"/api/jobs/{job_id}/cancel")
+    assert response.status_code == 202
+    assert should_continue() is False, (
+        "after a cancel request the cooperative flag must tell the pipeline to stop"
+    )
+
+    snapshot = client.get(f"/api/jobs/{job_id}").get_json()
+    assert snapshot["cancel_requested"] is True
+
+    release.set()
+
+
+def test_cancel_unknown_and_finished_jobs_are_rejected(tmp_path: Path) -> None:
+    """Unknown → 404; already-finished → 409. Neither mutates any state."""
+    client = create_app(tmp_path, orchestrator_factory=_InstantRunner).test_client()
+
+    missing = client.post("/api/jobs/does-not-exist/cancel")
+    assert missing.status_code == 404
+
+    holder: dict[str, str] = {}
+    _run_job(
+        client,
+        {
+            "topic": "A useful topic",
+            "project_name": "finished_job",
+            "sources": ["crossref"],
+            "exports": ["md"],
+        },
+        holder,
+    )
+    finished = client.post(f"/api/jobs/{holder['job_id']}/cancel")
+    assert finished.status_code == 409
+
+
+class _InstantRunner:
+    """Completes immediately with no artifacts and no usage — a fully finished job."""
+
+    def __init__(self, base_dir: Path) -> None:
+        self.delegate = Orchestrator(base_dir)
+
+    @property
+    def state_manager(self):
+        return self.delegate.state_manager
+
+    def init_project(self, name: str, mode: str) -> None:
+        self.delegate.init_project(name, mode)
+
+    def run_real_research(self, project_name: str, topic: str, **options: object):
+        callback = options["on_progress"]
+        callback("search", "completed")
+
+        class _Result:
+            reused_steps: ClassVar[list[str]] = []
+            resume_plan: ClassVar[str] = ""
+            resume_note: ClassVar[str] = ""
+            usage_note: ClassVar[str] = ""
+
+        return _Result()
+
+    def export(self, project_name: str, format: str) -> Path:
+        output = (
+            self.delegate.base_dir
+            / "projects"
+            / project_name
+            / "exports"
+            / f"{project_name}_final.{format}"
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("test export", encoding="utf-8")
+        return output
+
+
+class _CancellingRunner:
+    """Raises ResearchPipelineCancelled like the real pipeline does at a boundary."""
+
+    def __init__(self, base_dir: Path) -> None:
+        self.delegate = Orchestrator(base_dir)
+
+    @property
+    def state_manager(self):
+        return self.delegate.state_manager
+
+    def init_project(self, name: str, mode: str) -> None:
+        self.delegate.init_project(name, mode)
+
+    def run_real_research(self, project_name: str, topic: str, **options: object):
+        callback = options["on_progress"]
+        callback("search", "completed")
+        raise ResearchPipelineCancelled("用户已请求取消：运行在阶段边界停止。")
+
+    def export(self, project_name: str, format: str) -> Path:
+        raise AssertionError("a cancelled run must not export anything")
+
+
+def _wait_for_terminal(client, job_id: str) -> dict[str, object]:
+    """Poll until a job reaches any terminal state, including 'cancelled'."""
+    snapshot: dict[str, object] = {}
+    for _ in range(25):
+        snapshot = client.get(f"/api/jobs/{job_id}").get_json()
+        if snapshot["status"] in {"completed", "failed", "cancelled"}:
+            return snapshot
+        time.sleep(0.02)
+    raise AssertionError(f"job did not finish in time: {snapshot}")
+
+
+def test_cancelled_job_status_is_cancelled_and_log_is_truthful(
+    tmp_path: Path,
+) -> None:
+    """A cancelled run is 'cancelled' (not 'failed') and its log must not overclaim.
+
+    The wording must state the delay (stage boundary), that artifacts are kept,
+    and that the next run can resume — and must never claim it stopped instantly.
+    """
+    client = create_app(tmp_path, orchestrator_factory=_CancellingRunner).test_client()
+    response = client.post(
+        "/api/research",
+        json={
+            "topic": "A useful topic",
+            "project_name": "cancel_job",
+            "sources": ["crossref"],
+            "exports": ["md"],
+        },
+    )
+    assert response.status_code == 202
+    snapshot = _wait_for_terminal(client, response.get_json()["job_id"])
+
+    assert snapshot["status"] == "cancelled", "cancellation is not a failure"
+    assert snapshot["error"] is None, "a cancelled run has no error message"
+    assert snapshot["artifacts"] == [], "a cancelled run produced no download"
+
+    joined = "\n".join(snapshot["logs"])
+    assert "阶段边界" in joined, "the log must say cancellation takes effect at a boundary"
+    assert "续跑" in joined, "the log must say the partial artifacts can be resumed"
+    assert "立即" not in joined, "the log must NOT claim the run stopped instantly"
+
+
+def test_usage_note_reaches_the_snapshot_verbatim(tmp_path: Path) -> None:
+    """usage_note must be exposed exactly as reported — including 'not reported'."""
+    release = threading.Event()
+    runner = _BlockingRunner(tmp_path, release)
+    client = create_app(tmp_path, orchestrator_factory=lambda base: runner).test_client()
+
+    response = client.post(
+        "/api/research",
+        json={
+            "topic": "Usage topic",
+            "project_name": "usage_job",
+            "sources": ["crossref"],
+            "exports": ["md"],
+        },
+    )
+    job_id = response.get_json()["job_id"]
+    assert runner.started.wait(timeout=5)
+    release.set()
+
+    snapshot = None
+    for _ in range(25):
+        snapshot = client.get(f"/api/jobs/{job_id}").get_json()
+        if snapshot["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.02)
+
+    assert snapshot is not None and snapshot["status"] == "completed"
+    assert snapshot["usage_note"] == "已上报 2 次调用；1 次未获得用量。"
+    joined = "\n".join(snapshot["logs"])
+    assert "1 次未获得用量" in joined, (
+        "the log must carry the honest 'not reported' wording, not a fabricated cost"
+    )

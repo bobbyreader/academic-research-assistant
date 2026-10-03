@@ -23,6 +23,7 @@ import pytest
 from core.artifact_store import ArtifactStore
 from core.config_validation import ConfigValidationError
 from core.external_clients import PaperRecord, SearchReport
+from core.research_pipeline import ResearchPipelineCancelled
 from core.research_service import ResearchService
 from core.state_manager import ProjectState, StateManager, WorkflowStage
 from orchestrator import Orchestrator
@@ -698,4 +699,135 @@ def test_resume_matches_a_fresh_run_and_no_resume_forces_reruns(
     )
     assert harness.llm.complete_calls == completes_before + 1, (
         "--no-resume did not re-call the model"
+    )
+
+
+# ==========================================================================
+# Cancellation (P5.6): cancel at a stage boundary, keep artifacts, resume after
+# ==========================================================================
+#
+# This walks the same real chain as the rest of the file
+# (Orchestrator -> ResearchService -> ResearchPipeline). Cancellation is
+# cooperative: the callback is consulted at each stage boundary, so flipping the
+# flag from the real ``on_progress`` callback stops the run *after* the stage
+# that just finished — proving cancellation and resume compose correctly.
+
+
+class CancellingHarness(ResumeHarness):
+    """A resume harness that can request cancellation from the progress callback.
+
+    The flag is flipped when ``search`` reports ``completed`` — i.e. its
+    artifacts are already on disk (the pipeline saves them before that signal).
+    The run must therefore stop at the next boundary (before ``analysis``) and
+    leave the search artifacts intact.
+    """
+
+    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        super().__init__(tmp_path, monkeypatch)
+        self.cancel_flag = False
+        self.stages_seen: list[tuple[str, str]] = []
+
+    def run_cancelling(self):
+        def on_progress(stage: str, status: str) -> None:
+            self.stages_seen.append((stage, status))
+            if stage == "search" and status == "completed":
+                self.cancel_flag = True
+
+        return self.orchestrator.run_real_research(
+            "resume",
+            "climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+            data_path=self.data,
+            resume=True,
+            on_progress=on_progress,
+            should_continue=lambda: not self.cancel_flag,
+        )
+
+
+def test_cancel_stops_at_boundary_keeps_artifacts_and_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancel must be honest AND composable with resume.
+
+    Three guarantees:
+    1. The run stops with ``ResearchPipelineCancelled`` at a stage boundary
+       (after ``search``, before ``analysis``).
+    2. The artifacts already produced are still on disk — cancellation never
+       destroys work — and the model was not called for the next stage.
+    3. A subsequent run reuses the preserved prefix (``search``) without
+       re-querying the literature API, then finishes the manuscript.
+    """
+    harness = CancellingHarness(tmp_path, monkeypatch)
+
+    with pytest.raises(ResearchPipelineCancelled):
+        harness.run_cancelling()
+
+    # --- 1. it stopped at the boundary, not mid-stage -----------------------
+    assert ("search", "completed") in harness.stages_seen
+    assert ("lit_review", "completed") not in harness.stages_seen
+    assert harness.searcher.search_calls == 1, "search ran exactly once"
+    assert harness.llm.complete_json_calls == 0, (
+        "analysis (a model stage) must not have started before the boundary"
+    )
+
+    # --- 2. the search artifacts survive cancellation -----------------------
+    literature = harness.latest("search", "literature.json")
+    assert literature.is_file() and literature.stat().st_size > 0
+
+    # Project state records the honest cancellation (not 'blocked').
+    state = harness.orchestrator.state_manager.load("resume")
+    assert state is not None
+    assert "cancelled" in state.stage_status.values(), (
+        "the cancelled stage must be recorded as 'cancelled'"
+    )
+    assert "blocked" not in state.stage_status.values(), (
+        "cancellation must not be recorded as a failure"
+    )
+
+    # --- 3. a follow-up run reuses the prefix and finishes ------------------
+    searches_before = harness.searcher.search_calls
+    result = harness.run()
+
+    assert "search" in result.reused_steps, (
+        "the cancelled run's search artifacts must be reused, not thrown away"
+    )
+    assert harness.searcher.search_calls == searches_before, (
+        "resuming after a cancel must not re-query the literature API"
+    )
+    manuscript = harness.latest("writing", "manuscript.md")
+    assert manuscript.is_file() and manuscript.stat().st_size > 0
+
+
+def test_usage_note_travels_the_real_chain_to_the_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A run's ``usage_note`` must survive the real chain onto the result.
+
+    Whatever the pipeline measured (or could not measure) must reach the caller
+    verbatim; the CLI is the user's only view of cost, so a fabricated or dropped
+    note would be a truth defect. This fake client reports no token usage, so the
+    note must honestly say "not reported" — never a made-up number.
+    """
+    harness = ResumeHarness(tmp_path, monkeypatch)
+    result = harness.run()
+
+    note = result.usage_note
+    assert isinstance(note, str) and note, (
+        "a completed run must carry a usage note describing what was measured"
+    )
+    # The fake LLM reports no usage, so the note must admit that plainly...
+    assert "未获得用量" in note, (
+        "unreported usage must be stated as such, not silently dropped"
+    )
+    # ...and must never invent a number that was not reported.
+    assert "估算" in note, (
+        "the note must say it does not estimate when usage is unavailable"
+    )
+
+    # The CLI passes the note through unchanged (verbatim, labelled 用量).
+    Orchestrator(tmp_path).report_usage(result)
+    out = capsys.readouterr().out
+    assert f"[用量] {note}" in out, (
+        "the CLI must print the usage note verbatim, with no recomputation"
     )

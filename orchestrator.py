@@ -128,6 +128,18 @@ class Orchestrator:
         else:
             print("[续跑] 本次没有重新调用模型（全部会产生模型调用的阶段都已复用）。")
 
+    def report_usage(self, result: PipelineResult) -> None:
+        """Print the run's usage summary verbatim, or nothing when unavailable.
+
+        ``usage_note`` is the pipeline's honest description of what it actually
+        measured. We pass it through **unchanged** — no adding up, no cost
+        estimate — and print nothing when it is empty, so an empty line is never
+        mistaken for "this run cost nothing".
+        """
+        note = getattr(result, "usage_note", "") or ""
+        if note:
+            print(f"[用量] {note}")
+
     def show_status(self, project_name: str) -> None:
         """显示项目状态。
 
@@ -423,6 +435,7 @@ def main() -> None:
                 resume=not args.no_resume,
             )
             orchestrator.report_resume(result)
+            orchestrator.report_usage(result)
             # argparse cannot narrow a free-form string to a Literal, and
             # --export accepts arbitrary values; Orchestrator.export validates.
             formats: list[ExportFormat] = (

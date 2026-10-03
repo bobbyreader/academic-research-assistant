@@ -13,6 +13,7 @@ from core.llm_client import build_llm_client
 from core.research_pipeline import (
     PipelineResult,
     ResearchPipeline,
+    ResearchPipelineCancelled,
     ResearchPipelineConfig,
 )
 from core.resume import (
@@ -22,6 +23,7 @@ from core.resume import (
     plan_resume,
 )
 from core.state_manager import StateManager, WorkflowStage
+from core.usage import UsageTrackingClient
 
 
 class ResearchService:
@@ -51,6 +53,7 @@ class ResearchService:
         base_url: str | None = None,
         on_progress: Callable[[str, str], None] | None = None,
         resume: bool = True,
+        should_continue: Callable[[], bool] | None = None,
     ) -> PipelineResult:
         # Validate configuration before touching any state or network resource:
         # a broken settings file must fail in under a second with the offending
@@ -179,18 +182,25 @@ class ResearchService:
             pipeline = ResearchPipeline(
                 self.artifact_store,
                 searcher=searcher,
-                llm_client=build_llm_client(
-                    provider=selected_provider,
-                    model=selected_model,
-                    api_key=api_key,
-                    base_url=selected_base_url,
-                    timeout=llm_timeout,
-                    workspace_dir=self.projects_dir / project_name,
+                # 用量统计是**纯观测**包装：它只转发 complete/complete_json 并记账，
+                # 不改变调用次数，也不改变返回内容。
+                llm_client=UsageTrackingClient(
+                    build_llm_client(
+                        provider=selected_provider,
+                        model=selected_model,
+                        api_key=api_key,
+                        base_url=selected_base_url,
+                        timeout=llm_timeout,
+                        workspace_dir=self.projects_dir / project_name,
+                    ),
+                    provider=str(selected_provider or ""),
+                    model=str(selected_model or ""),
                 ),
                 progress=progress,
                 reviewer_count=reviewer_count,
                 figure_dpi=figure_dpi,
                 resume=decision,
+                should_continue=should_continue,
             )
             result = pipeline.run(
                 ResearchPipelineConfig(
@@ -201,6 +211,14 @@ class ResearchService:
                     data_path=data_path,
                 )
             )
+        except ResearchPipelineCancelled:
+            # 取消是用户**主动行为**，不是错误：状态记为 `"cancelled"` 而非
+            # `"blocked"`，并把状态落盘，然后原样重新抛出（调用方需知道运行未完成）。
+            # 用量的落盘由管线在自己的 finally 中完成，此处不重复。
+            state.current_stage = active_stage
+            state.stage_status[active_stage] = "cancelled"
+            self.state_manager.save(state)
+            raise
         except Exception:
             state.current_stage = active_stage
             state.stage_status[active_stage] = "blocked"

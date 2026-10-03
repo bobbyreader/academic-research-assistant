@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from core.http_client import HttpClientError, UrllibTransport
+from core.usage import TokenCounts
 
 
 class LLMClientError(RuntimeError):
@@ -81,8 +82,15 @@ class OpenAICompatibleClient:
             )
         self.settings = settings
         self.transport = transport or UrllibTransport(timeout=settings.timeout)
+        self._last_usage: TokenCounts | None = None
+
+    def last_usage(self) -> TokenCounts | None:
+        """最近一次调用由提供商上报的用量；未提供时为 ``None``（绝不估算）。"""
+        return self._last_usage
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
+        # 每次调用先清空上一次的用量，避免复用陈旧数字——拿不到就是 None。
+        self._last_usage = None
         endpoint = self.settings.base_url.rstrip("/")
         if not endpoint.endswith("/chat/completions"):
             endpoint += "/chat/completions"
@@ -113,6 +121,7 @@ class OpenAICompatibleClient:
             )
         if not isinstance(content, str) or not content.strip():
             raise LLMClientError("LLM 返回了空内容")
+        self._last_usage = _parse_openai_usage(response)
         return content.strip()
 
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
@@ -131,8 +140,15 @@ class GeminiClient:
             raise LLMClientError("未配置 Gemini API 密钥，请设置 GEMINI_API_KEY")
         self.settings = settings
         self.transport = transport or UrllibTransport(timeout=settings.timeout)
+        self._last_usage: TokenCounts | None = None
+
+    def last_usage(self) -> TokenCounts | None:
+        """最近一次调用由提供商上报的用量；未提供时为 ``None``（绝不估算）。"""
+        return self._last_usage
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
+        # 每次调用先清空上一次的用量，避免复用陈旧数字——拿不到就是 None。
+        self._last_usage = None
         endpoint = (
             f"{self.settings.base_url.rstrip('/')}/models/"
             f"{self.settings.model}:generateContent"
@@ -170,6 +186,7 @@ class GeminiClient:
             raise LLMClientError("Gemini 返回缺少 candidates.content.parts") from exc
         if not content.strip():
             raise LLMClientError("Gemini 返回了空内容")
+        self._last_usage = _parse_gemini_usage(response)
         return content.strip()
 
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
@@ -191,8 +208,22 @@ class CodexCLIClient:
         self.workspace_dir = workspace_dir.resolve()
         self.executable = executable if executable is not None else shutil.which("codex")
         self.runner = runner
+        self._last_usage: TokenCounts | None = None
+
+    def last_usage(self) -> TokenCounts | None:
+        """最近一次调用由 Codex CLI 上报的用量；未提供时为 ``None``（绝不估算）。
+
+        **实证依据**：``codex exec --json`` 会把事件以 JSONL 写到 stdout，其中
+        ``turn.completed`` 事件带 ``usage``（``input_tokens`` / ``output_tokens`` /
+        ``cached_input_tokens`` / ``reasoning_output_tokens``）。本客户端已启用
+        ``--json`` 并据此解析。若 CLI 版本较旧、未输出该事件或解析失败，则返回
+        ``None``（记为未上报），**不会用任何启发式估算**。
+        """
+        return self._last_usage
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
+        # 每次调用先清空上一次的用量，避免复用陈旧数字——拿不到就是 None。
+        self._last_usage = None
         if not self.executable:
             raise LLMClientError(
                 "未找到 Codex CLI。请先安装并登录 Codex，然后重新启动研究助手。"
@@ -207,11 +238,14 @@ class CodexCLIClient:
         output_path = Path(output_name)
         command = self._command(output_path)
         prompt = self._prompt(system_prompt, user_prompt)
+        stdout = ""
         try:
             if self.runner is not None:
-                self.runner(command, prompt, output_path, self.settings.timeout)
+                stdout = self.runner(
+                    command, prompt, output_path, self.settings.timeout
+                ) or ""
             else:
-                self._run(command, prompt)
+                stdout = self._run(command, prompt)
             content = output_path.read_text(encoding="utf-8").strip()
         except subprocess.TimeoutExpired as exc:
             raise LLMClientError("Codex 生成超时，请稍后重试") from exc
@@ -222,6 +256,8 @@ class CodexCLIClient:
 
         if not content:
             raise LLMClientError("Codex 没有返回可用内容，请确认 Codex CLI 已登录")
+        # 正文已安全拿到；用量解析失败只是"未上报"，绝不能让 complete() 失败。
+        self._last_usage = _parse_codex_usage(stdout)
         return content
 
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
@@ -241,6 +277,9 @@ class CodexCLIClient:
             "--skip-git-repo-check",
             "--sandbox",
             "read-only",
+            # --json 让 stdout 变为 JSONL 事件流，其中 `turn.completed` 携带真实用量。
+            # 正文仍由 `--output-last-message` 文件提供，读取方式不变。
+            "--json",
             "--cd",
             str(self.workspace_dir),
             "--output-last-message",
@@ -260,7 +299,7 @@ class CodexCLIClient:
             f"研究资料与请求：\n{user_prompt}"
         )
 
-    def _run(self, command: list[str], prompt: str) -> None:
+    def _run(self, command: list[str], prompt: str) -> str:
         result = subprocess.run(
             command,
             input=prompt,
@@ -275,6 +314,7 @@ class CodexCLIClient:
             raise LLMClientError(
                 "Codex CLI 请求失败。请确认已完成 Codex 登录且当前账户可用" + suffix
             )
+        return result.stdout or ""
 
 
 def build_llm_client(
@@ -329,3 +369,107 @@ def build_llm_client(
     raise LLMClientError(
         "不支持的 LLM provider，请使用 codex_cli、gemini 或 openai_compatible"
     )
+
+
+def _as_int(value: object) -> int | None:
+    """把上报的数值转成 int；非整数（含 bool）一律返回 None（不猜测）。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _parse_openai_usage(response: object) -> TokenCounts | None:
+    """从 OpenAI 兼容响应里解析 ``usage``；缺失或非法时返回 ``None``。"""
+    if not isinstance(response, dict):
+        return None
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    prompt = _as_int(usage.get("prompt_tokens"))
+    completion = _as_int(usage.get("completion_tokens"))
+    total = _as_int(usage.get("total_tokens"))
+    if prompt is None or completion is None:
+        return None
+    if total is None:
+        # 少数兼容端不回传 total；仅对已上报的输入/输出求和，不是估算。
+        total = prompt + completion
+    cached = _as_int(
+        usage.get("prompt_tokens_details", {}).get("cached_tokens")
+        if isinstance(usage.get("prompt_tokens_details"), dict)
+        else None
+    )
+    reasoning = _as_int(
+        usage.get("completion_tokens_details", {}).get("reasoning_tokens")
+        if isinstance(usage.get("completion_tokens_details"), dict)
+        else None
+    )
+    return TokenCounts(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=total,
+        cached_input_tokens=cached,
+        reasoning_output_tokens=reasoning,
+    )
+
+
+def _parse_gemini_usage(response: object) -> TokenCounts | None:
+    """从 Gemini 响应里解析 ``usageMetadata``；缺失或非法时返回 ``None``。"""
+    if not isinstance(response, dict):
+        return None
+    metadata = response.get("usageMetadata")
+    if not isinstance(metadata, dict):
+        return None
+    prompt = _as_int(metadata.get("promptTokenCount"))
+    completion = _as_int(metadata.get("candidatesTokenCount"))
+    total = _as_int(metadata.get("totalTokenCount"))
+    if prompt is None or completion is None:
+        return None
+    if total is None:
+        total = prompt + completion
+    cached = _as_int(metadata.get("cachedContentTokenCount"))
+    reasoning = _as_int(metadata.get("thoughtsTokenCount"))
+    return TokenCounts(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=total,
+        cached_input_tokens=cached,
+        reasoning_output_tokens=reasoning,
+    )
+
+
+def _parse_codex_usage(stdout: str) -> TokenCounts | None:
+    """从 ``codex exec --json`` 的 JSONL 事件流里解析真实用量。
+
+    取 ``turn.completed`` 事件的 ``usage``：``input_tokens`` → 输入，
+    ``output_tokens`` → 输出。**Codex CLI 不提供 total 字段**，因此这里的
+    ``total_tokens = input + output``——这是对**已上报的两个数字**求和，属于如实核算，
+    不是估算。任何非 JSON 行、未知事件类型、缺失或非法的 ``usage`` 都返回 ``None``
+    （记为未上报），绝不猜测。
+    """
+    if not stdout:
+        return None
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "turn.completed":
+            continue
+        usage = event.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        prompt = _as_int(usage.get("input_tokens"))
+        completion = _as_int(usage.get("output_tokens"))
+        if prompt is None or completion is None:
+            return None
+        return TokenCounts(
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=prompt + completion,
+            cached_input_tokens=_as_int(usage.get("cached_input_tokens")),
+            reasoning_output_tokens=_as_int(usage.get("reasoning_output_tokens")),
+        )
+    return None

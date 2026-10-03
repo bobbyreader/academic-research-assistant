@@ -223,6 +223,21 @@
                 <li data-stage="export"><span>04</span><strong>整理下载</strong><em class="stage-state">待开始</em></li>
               </ol>
               <p class="progress-footer" id="progress-footer">暂未运行任务</p>
+              <button class="cancel-button hidden" id="cancel-button" type="button">
+                <span>取消本次研究</span>
+              </button>
+              <p class="cancel-note hidden" id="cancel-note">
+                取消不会立即中断：当前阶段会先跑完，再在阶段边界停止。
+                已产出的产物会保留，下次运行可续跑。
+              </p>
+              <p class="usage-note hidden" id="usage-note"></p>
+            </section>
+
+            <section class="queue-card" aria-labelledby="queue-title">
+              <div class="card-label"><span>QUEUE</span><i aria-hidden="true"></i></div>
+              <h2 id="queue-title">任务队列</h2>
+              <p class="queue-hint">本机一次只运行一个研究任务，其余任务依次排队。</p>
+              <ul class="queue-list" id="queue-list"></ul>
             </section>
           </aside>
         </div>

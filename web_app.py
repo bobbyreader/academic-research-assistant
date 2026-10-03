@@ -18,6 +18,7 @@ from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.utils import secure_filename
 
 from core.artifact_store import ArtifactStore
+from core.research_pipeline import ResearchPipelineCancelled
 from core.resume import RESUME_STEPS
 from core.state_manager import ProjectState, StateManager
 from orchestrator import Orchestrator
@@ -54,9 +55,23 @@ class WebJob:
     reused_steps: list[str] = field(default_factory=list)
     resume_plan: str = ""
     resume_note: str = ""
+    #: 本次运行的真实用量摘要（`PipelineResult.usage_note` 的逐字透传）。
+    #: 可能为空串；空串表示"未获得用量"，**绝不**据此估算花费。
+    usage_note: str = ""
     logs: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     finished_at: str | None = None
+    #: 协作式取消标志。worker 通过 should_continue 读取它；置位后在**阶段边界**
+    #: 生效，不会立即杀掉正在写产物的阶段。
+    cancel_requested: bool = False
+
+
+#: 排队位置语义：新建任务按创建顺序获得从 1 开始的序号；0 明确表示"正在运行，
+#: 不属于队列"。使用 0 而不是 None，前端/JSON 消费方不必区分 null 与缺省。
+QUEUE_POSITION_RUNNING = 0
+
+#: 已结束（不可再取消，也不占用队列位置）的状态。
+TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 
 class JobManager:
@@ -88,6 +103,91 @@ class JobManager:
             if job is not None:
                 job.logs.append(message)
 
+    def list_snapshots(self) -> list[dict[str, Any]]:
+        """Return a compact snapshot of **every** job, queue order preserved.
+
+        ``queue_position`` is 1-based for jobs still ``queued`` (creation order),
+        and ``QUEUE_POSITION_RUNNING`` (0) for the job currently ``running``.
+        Finished jobs report ``None`` — they are neither queued nor running.
+        """
+        with self._lock:
+            created_order = sorted(
+                self._jobs.values(), key=lambda job: job.created_at
+            )
+            positions: dict[str, int] = {}
+            next_position = 1
+            for job in created_order:
+                if job.status == "queued":
+                    positions[job.job_id] = next_position
+                    next_position += 1
+            running_id = next(
+                (job.job_id for job in created_order if job.status == "running"),
+                None,
+            )
+            snapshots: list[dict[str, Any]] = []
+            for job in created_order:
+                if job.job_id in positions:
+                    position: int | None = positions[job.job_id]
+                elif job.job_id == running_id:
+                    position = QUEUE_POSITION_RUNNING
+                else:
+                    position = None
+                snapshots.append(
+                    {
+                        "job_id": job.job_id,
+                        "project_name": job.project_name,
+                        "topic": job.topic,
+                        "status": job.status,
+                        "created_at": job.created_at,
+                        "finished_at": job.finished_at,
+                        "queue_position": position,
+                        "cancel_requested": job.cancel_requested,
+                    }
+                )
+            return snapshots
+
+    def cancel(self, job_id: str) -> bool:
+        """Request cancellation for a job. Returns False if it cannot be cancelled.
+
+        * ``queued`` — the job has not started, so it is marked ``cancelled``
+          immediately. The worker will still run, see the flag, and return
+          without doing any work.
+        * ``running`` — a cooperative flag is set. The pipeline checks it at each
+          **stage boundary**, so cancellation takes effect after the current
+          stage finishes, never mid-stage. A ``running`` job stays ``running``
+          until the worker observes the flag and marks it ``cancelled``.
+        * unknown job or already terminal — returns False (no-op).
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.status in TERMINAL_STATUSES:
+                return False
+            job.cancel_requested = True
+            if job.status == "queued":
+                job.status = "cancelled"
+                job.finished_at = datetime.now(UTC).isoformat()
+                job.logs.append(
+                    "取消请求已受理：任务尚未开始，已直接标记为「已取消」。"
+                )
+            return True
+
+    def is_cancelled(self, job_id: str) -> bool:
+        """Whether a cancel has been requested for this job (thread-safe).
+
+        Used by the worker as its ``should_continue`` predicate: returning the
+        negation at each stage boundary is exactly the cooperative signal the
+        pipeline expects.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return job is not None and job.cancel_requested
+
+    def status_of(self, job_id: str) -> str | None:
+        """Current status of a job, or ``None`` if unknown (thread-safe)."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return job.status if job is not None else None
+
     def snapshot(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -110,6 +210,8 @@ class JobManager:
                 "reused_steps": list(job.reused_steps),
                 "resume_plan": job.resume_plan,
                 "resume_note": job.resume_note,
+                "usage_note": job.usage_note,
+                "cancel_requested": job.cancel_requested,
                 "logs": list(job.logs),
                 "created_at": job.created_at,
                 "finished_at": job.finished_at,
@@ -284,12 +386,24 @@ def create_app(
             return jsonify(error="该格式尚未生成"), 404
         return send_file(path, as_attachment=True, download_name=path.name)
 
+    @app.get("/api/jobs")
+    def job_list() -> Any:
+        return jsonify({"jobs": jobs.list_snapshots()})
+
     @app.get("/api/jobs/<job_id>")
     def job_status(job_id: str) -> Any:
         snapshot = jobs.snapshot(job_id)
         if snapshot is None:
             return jsonify(error="任务不存在"), 404
         return jsonify(snapshot)
+
+    @app.post("/api/jobs/<job_id>/cancel")
+    def cancel_job(job_id: str) -> Any:
+        if jobs.snapshot(job_id) is None:
+            return jsonify(error="任务不存在"), 404
+        if not jobs.cancel(job_id):
+            return jsonify(error="任务已完成或无法取消"), 409
+        return jsonify({"job_id": job_id, "status": "cancel_requested"}), 202
 
     @app.post("/api/research")
     def start_research() -> Any:
@@ -337,12 +451,20 @@ def create_app(
         job = WebJob(job_id=job_id, project_name=project_name, topic=topic)
 
         def worker(current_job_id: str) -> None:
+            # queued 期间被取消：任务从未开始，直接返回，不进入研究流程。
+            if jobs.status_of(current_job_id) == "cancelled":
+                return
             jobs.update(current_job_id, status="running", stage_status={**job.stage_status, "search": "in_progress"})
             jobs.log(
                 current_job_id,
                 "开始执行研究任务"
                 + ("" if resume else "（已选择全新运行，不复用旧产物）"),
             )
+
+            def should_continue() -> bool:
+                """阶段边界检查：只要用户请求取消即返回 False。"""
+                return not jobs.is_cancelled(current_job_id)
+
             try:
                 runner = app.config["ORCHESTRATOR_FACTORY"](project_root)
                 if runner.state_manager.load(project_name) is None:
@@ -360,12 +482,16 @@ def create_app(
                     provider=provider,
                     on_progress=on_progress,
                     resume=resume,
+                    should_continue=should_continue,
                 )
                 reused_steps = list(getattr(result, "reused_steps", []) or [])
                 resume_plan = getattr(result, "resume_plan", "") or ""
                 resume_note = getattr(result, "resume_note", "") or ""
                 for line in _resume_log_lines(reused_steps, resume_plan, resume_note):
                     jobs.log(current_job_id, line)
+                usage_note = getattr(result, "usage_note", "") or ""
+                if usage_note:
+                    jobs.log(current_job_id, f"用量：{usage_note}")
                 artifacts: list[dict[str, str]] = []
                 warnings: list[str] = []
                 for export_format in exports:
@@ -391,6 +517,19 @@ def create_app(
                     reused_steps=reused_steps,
                     resume_plan=resume_plan,
                     resume_note=resume_note,
+                    usage_note=usage_note,
+                    finished_at=datetime.now(UTC).isoformat(),
+                )
+            except ResearchPipelineCancelled:
+                # 协作式取消在**阶段边界**生效：已开始的阶段已完整落盘，可续跑。
+                jobs.log(
+                    current_job_id,
+                    "已停止：取消在阶段边界生效（未打断正在执行的阶段），"
+                    "已产出的产物会保留，下次运行可续跑。",
+                )
+                jobs.update(
+                    current_job_id,
+                    status="cancelled",
                     finished_at=datetime.now(UTC).isoformat(),
                 )
             except Exception as exc:

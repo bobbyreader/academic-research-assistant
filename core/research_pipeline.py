@@ -49,6 +49,15 @@ class ResearchPipelineError(RuntimeError):
     """Raised when a pipeline stage cannot produce a trustworthy result."""
 
 
+class ResearchPipelineCancelled(ResearchPipelineError):
+    """用户请求取消，运行在**阶段边界**停止。
+
+    语义必须如实：取消只在阶段边界生效——正在执行的阶段会跑完，之后不再进入
+    下一阶段。这里**不**声称"立即停止"，也**不**试图杀线程。正因为只在边界检查，
+    不会留下半成品：任何已开始的阶段其产物都会完整落盘。
+    """
+
+
 ProgressCallback = Callable[[str, str], None]
 
 
@@ -80,6 +89,9 @@ class PipelineResult:
     #: **事后**口径：本次**实际**复用了哪些阶段（`describe_reuse(reused_steps)`）。
     #: 全新运行（`resume=None`）时为空串。事实不解释原因，故与 `resume_plan` 并存。
     resume_note: str = ""
+    #: 本次运行的真实用量摘要（`UsageReport.note()`），逐字透传、**绝不估算**。
+    #: 无用量统计时为 ""（例如单测里直接注入裸 `FakeLLM` 的场景）。
+    usage_note: str = ""
 
 
 @dataclass
@@ -105,6 +117,7 @@ class ResearchPipeline:
         reviewer_count: int = 1,
         figure_dpi: int = 300,
         resume: ResumeDecision | None = None,
+        should_continue: Callable[[], bool] | None = None,
     ) -> None:
         self.artifact_store = artifact_store
         self.searcher = searcher
@@ -117,8 +130,24 @@ class ResearchPipeline:
         self.figure_dpi = figure_dpi
         #: 断点续跑判定；None 表示全新运行（行为与引入续跑之前完全一致）。
         self.resume = resume
+        #: 协作式取消：在每个**阶段边界**调用一次；返回 False 则以
+        #: `ResearchPipelineCancelled` 停止于边界。None 表示永不取消，行为与未
+        #: 引入取消之前逐字节一致。
+        self.should_continue = should_continue
 
     def run(self, config: ResearchPipelineConfig) -> PipelineResult:
+        """执行管线；**无论成功、失败还是取消**，都把用量落盘。
+
+        用量落盘必须发生在 `finally` 中：部分运行（例如用户中途取消）同样产生了
+        真实的模型调用与费用，这是一笔真实开销，不能因为没跑完就丢掉记录。取消
+        路径没有 `PipelineResult` 可挂载用量，故落盘是它唯一如实呈现用量的途径。
+        """
+        try:
+            return self._run_stages(config)
+        finally:
+            self._persist_usage(config.project_name)
+
+    def _run_stages(self, config: ResearchPipelineConfig) -> PipelineResult:
         if not config.topic.strip():
             raise ResearchPipelineError("研究主题不能为空")
 
@@ -137,9 +166,19 @@ class ResearchPipeline:
         def mark_reused(step: str) -> None:
             reused_steps.append(step)
 
+        def check_continue() -> None:
+            """在**阶段边界**检查是否继续；取消则抛出、停在边界。
+
+            只在进入某阶段**之前**调用一次（对"复用并跳过"的路径亦然）。不在
+            阶段中途检查，故不会打断正在写产物的阶段——取消不会留下半成品。
+            """
+            if self.should_continue is not None and not self.should_continue():
+                raise ResearchPipelineCancelled("用户已请求取消：运行在阶段边界停止。")
+
         # ------------------------------------------------------------------ #
         # 阶段 1：检索
         # ------------------------------------------------------------------ #
+        check_continue()
         report: SearchReport | None = None
         if should_skip("search"):
             try:
@@ -188,6 +227,7 @@ class ResearchPipeline:
         # ------------------------------------------------------------------ #
         # 阶段 2：分析与统计
         # ------------------------------------------------------------------ #
+        check_continue()
         data_summary: dict[str, Any] | None = None
         dataset: DatasetAnalysis | None = None
         analysis: dict[str, Any] | None = None
@@ -245,6 +285,7 @@ class ResearchPipeline:
         # ------------------------------------------------------------------ #
         # 阶段 3：论断核验（顾问级）
         # ------------------------------------------------------------------ #
+        check_continue()
         claim_report: ClaimVerificationReport | None = None
         claim_warnings: list[str] = []
         claim_rehydrated = False
@@ -276,6 +317,7 @@ class ResearchPipeline:
         # ------------------------------------------------------------------ #
         # 阶段 4：撰写
         # ------------------------------------------------------------------ #
+        check_continue()
         body: str | None = None
         verification: CitationVerificationReport | None = None
         stats_verification: Any = None
@@ -386,6 +428,7 @@ class ResearchPipeline:
         # ------------------------------------------------------------------ #
         # 阶段 5：同行评审（顾问级）
         # ------------------------------------------------------------------ #
+        check_continue()
         review: PeerReviewBundle | None = None
         review_warnings: list[str] = []
         review_rehydrated = False
@@ -452,6 +495,15 @@ class ResearchPipeline:
             warnings.extend(stats_verification.warnings())
         warnings.extend(review_warnings)
         warnings.extend(rehydrate_warnings)
+        # 用量统计是纯观测：只把 `UsageReport` 的内容原样带给调用方，绝不在管线里
+        # 做任何数字加工（不估算、不补齐、不四舍五入）。
+        usage_note = ""
+        usage_warnings = self._usage_warnings()
+        if usage_warnings:
+            warnings.extend(usage_warnings)
+        usage_report = self._usage_report()
+        if usage_report is not None:
+            usage_note = str(usage_report.note())
         if data_summary is None:
             warnings.append("未提供实验数据；分析结果是文献综合，不是统计显著性检验。")
         return PipelineResult(
@@ -471,7 +523,93 @@ class ResearchPipeline:
             resume_note=(
                 describe_reuse(reused_steps) if self.resume is not None else ""
             ),
+            # 用量摘要（`UsageReport.note()` 的逐字透传）；无用量统计时为空串。
+            usage_note=usage_note,
         )
+
+    # ------------------------------------------------------------------ #
+    # 用量统计：纯观测，不改变任何模型调用次数
+    # ------------------------------------------------------------------ #
+    def _usage_report(self) -> Any:
+        """取回底层 LLM 客户端的 `UsageReport`；无则返回 None。
+
+        用量由 `UsageTrackingClient`（包装在 `build_llm_client` 之外）提供，因此这里
+        只做鸭子类型的**读取**：没有 `report` 属性（例如单测里注入裸客户端，或用户
+        直接构造管线）时返回 None，不改变任何既有行为。
+        """
+        client = self.llm_client
+        report = getattr(client, "report", None)
+        return report if report is not None else None
+
+    def _usage_warnings(self) -> list[str]:
+        """透传 `UsageReport.warnings()`；无用量统计时返回空列表。
+
+        这里刻意只读、不加工：用量告警是观测结果，管线无权改写措辞或过滤。
+        """
+        report = self._usage_report()
+        if report is None:
+            return []
+        warnings = getattr(report, "warnings", None)
+        if not callable(warnings):
+            return []
+        return [str(item) for item in warnings()]
+
+    def _persist_usage(self, project_name: str) -> None:
+        """把用量落盘为 `artifacts/run/usage_report.json` 与 `.md`。
+
+        在 `run()` 的 `finally` 中调用，故成功、失败、取消三条路径都会落盘。没有
+        用量统计（裸客户端、无 `report`）时静默返回——不制造空产物来假装统计过。
+        落盘失败不吞掉：它发生在 `finally` 中，若失败应在调用方可见，而不是被
+        "运行已经出错"掩盖。仅当用量统计本身不存在时才跳过。
+        """
+        report = self._usage_report()
+        if report is None:
+            return
+        self._save_json(project_name, "run", "usage_report.json", report.to_dict())
+        self.artifact_store.save_artifact(
+            project_name,
+            "run",
+            "usage_report.md",
+            self._usage_markdown(report),
+        )
+
+    def _usage_markdown(self, report: Any) -> str:
+        """渲染用量的可读版本：含摘要 `note()` 与逐次调用明细。
+
+        逐次调用明细来自 `report.to_dict()` 的 `records` 列表（**不是**顶层的
+        `calls`——后者是调用总次数，是个整数）。这里**不重算、不补数**：只把每条
+        记录里实际存在的键原样列出，缺失即省略，绝不臆造。
+
+        **不得静默降级**：若 `records` 字段存在但不是列表，说明用量结构已损坏，
+        这不是"没有明细"而是**结构异常**——必须显式失败，绝不当作空明细悄悄跳过。
+        （早期版本读错键名 `calls`，导致逐次明细被静默丢弃、产物看起来"正常"；
+        这个错误之所以危险正因为它没有声音。见 `tests/test_research_pipeline.py`
+        里对明细条数的断言。）
+        """
+        lines = ["# 用量报告", "", str(report.note()), ""]
+        payload = report.to_dict()
+        if not isinstance(payload, dict):
+            raise ResearchPipelineError(
+                f"用量报告结构异常：to_dict() 期望 dict，实际为 {type(payload).__name__}"
+            )
+        if "records" in payload and not isinstance(payload["records"], list):
+            raise ResearchPipelineError(
+                "用量报告结构异常：records 期望 list，实际为 "
+                f"{type(payload['records']).__name__}"
+            )
+        records = payload.get("records")
+        if isinstance(records, list) and records:
+            lines.extend(["## 逐次调用明细", ""])
+            for index, record in enumerate(records, 1):
+                if not isinstance(record, dict):
+                    lines.append(f"- 调用 {index}：{record}")
+                    continue
+                detail = "，".join(
+                    f"{key}={value}" for key, value in record.items()
+                )
+                lines.append(f"- 调用 {index}：{detail}")
+            lines.append("")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------ #
     # 断点续跑：从既有产物重水化内存对象

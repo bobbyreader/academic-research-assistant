@@ -167,6 +167,26 @@ textarea:focus, input[type="text"]:focus, select:focus { border-color: var(--tea
 .stage-state { color: #a9bbb1; font-size: 9px; font-style: normal; }
 .stage-list li[data-status="completed"] .stage-state { color: #8ac5ad; }
 .progress-footer { color: #b2c1b9; font-size: 10px; margin: 14px 0 0; }
+.cancel-button { background: transparent; border: 1px solid rgba(255, 155, 132, .55); border-radius: 8px; color: #ff9b84; font-size: 11px; margin-top: 14px; min-height: 38px; padding: 8px 13px; width: 100%; transition: background .2s, color .2s; }
+.cancel-button:hover:not(:disabled) { background: #ff9b84; color: var(--forest); }
+.cancel-button:disabled { cursor: wait; opacity: .6; }
+.cancel-note { color: #d7b7ae; font-size: 10px; line-height: 1.55; margin: 9px 0 0; }
+.usage-note { color: #cbd8d0; font-size: 10px; line-height: 1.55; margin: 12px 0 0; overflow-wrap: anywhere; }
+
+.queue-card { background: rgba(255, 254, 250, .92); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 24px; }
+.queue-card h2 { font-family: "Iowan Old Style", Georgia, serif; font-size: 25px; font-weight: 400; letter-spacing: -.035em; margin: 7px 0 0; }
+.queue-hint { color: var(--muted); font-size: 10px; line-height: 1.5; margin: 12px 0 0; }
+.queue-list { list-style: none; margin: 16px 0 0; padding: 0; }
+.queue-item { align-items: center; border-top: 1px solid var(--line); display: grid; gap: 3px 9px; grid-template-columns: 1fr auto; padding: 11px 0; }
+.queue-item strong { font-family: "Iowan Old Style", Georgia, serif; font-size: 14px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-topic { color: var(--muted); font-size: 10px; grid-column: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-state { color: var(--teal); font-size: 10px; font-style: normal; grid-column: 1; }
+.queue-item.is-running .queue-state { color: var(--amber); }
+.queue-item.is-queued .queue-state { color: var(--muted); }
+.queue-cancel { align-self: center; background: transparent; border: 1px solid var(--line); border-radius: 7px; color: var(--coral-deep); font-size: 10px; grid-column: 2; grid-row: 1 / span 2; padding: 6px 10px; }
+.queue-cancel:hover:not(:disabled) { background: var(--coral); border-color: var(--coral); color: var(--paper); }
+.queue-cancel:disabled { cursor: wait; opacity: .5; }
+.queue-empty { color: var(--muted); font-size: 12px; padding: 14px 0; }
 
 .results-panel { border-radius: 14px; margin-top: 25px; padding: 27px 31px; }
 .results-heading, .result-content, .section-heading-line { align-items: start; display: flex; justify-content: space-between; }
