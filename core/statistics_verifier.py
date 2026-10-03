@@ -21,11 +21,71 @@ import re
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 
+from core.research_models import ArtifactDecodeError
+
 #: Matches ``p < 0.05``, ``p = 0.031``, ``p-value=0.03``, ``P <= .01`` …
 P_VALUE_PATTERN = re.compile(
     r"\bp\s*(?:-?\s*value\s*)?(?P<operator><=|>=|<|>|=)\s*(?P<value>\d*\.?\d+)",
     re.IGNORECASE,
 )
+
+
+# --------------------------------------------------------------------------- #
+# 反序列化校验：结构非法一律抛 ValueError（绝不静默构造半个对象）
+# --------------------------------------------------------------------------- #
+def _require_object(value: object, owner: str) -> dict:
+    """要求是映射（dict）；否则抛 ``ValueError``。"""
+    if not isinstance(value, dict):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 期望 payload 为 dict，实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_str(data: dict, field: str, owner: str) -> str:
+    value = data.get(field)
+    if not isinstance(value, str):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 str，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_bool(data: dict, field: str, owner: str) -> bool:
+    value = data.get(field)
+    if not isinstance(value, bool):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 bool，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_float(data: dict, field: str, owner: str) -> float:
+    value = data.get(field)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 float，"
+            f"实际为 {type(value).__name__}"
+        )
+    return float(value)
+
+
+def _require_float_list(data: dict, field: str, owner: str) -> list[float]:
+    value = data.get(field)
+    if not isinstance(value, list):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 list[float]，"
+            f"实际为 {type(value).__name__}"
+        )
+    for index, item in enumerate(value):
+        if not isinstance(item, (int, float)) or isinstance(item, bool):
+            raise ArtifactDecodeError(
+                f"{owner}.from_dict 字段 '{field}' 的第 {index} 个元素期望数值，"
+                f"实际为 {type(item).__name__}"
+            )
+    return [float(item) for item in value]
 
 
 def _matches_reported_precision(reported_text: str, value: float, computed: Sequence[float]) -> bool:
@@ -49,6 +109,18 @@ class StatisticsClaim:
     value: float
     matched: bool
     note: str = ""
+
+    @classmethod
+    def from_dict(cls, payload: object) -> StatisticsClaim:
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。"""
+        data = _require_object(payload, cls.__name__)
+        return cls(
+            raw=_require_str(data, "raw", cls.__name__),
+            operator=_require_str(data, "operator", cls.__name__),
+            value=_require_float(data, "value", cls.__name__),
+            matched=_require_bool(data, "matched", cls.__name__),
+            note=_require_str(data, "note", cls.__name__),
+        )
 
 
 @dataclass
@@ -90,6 +162,35 @@ class StatisticsVerificationReport:
             "unmatched_count": len(self.unmatched),
             "claims": [asdict(claim) for claim in self.claims],
         }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> StatisticsVerificationReport:
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。
+
+        ``passed``、``claim_count``、``unmatched_count`` 均为派生字段，重建时由
+        属性自动重算。
+        """
+        data = _require_object(payload, cls.__name__)
+        claims = data.get("claims")
+        if not isinstance(claims, list):
+            raise ArtifactDecodeError(
+                f"{cls.__name__}.from_dict 字段 'claims' 期望 list，"
+                f"实际为 {type(claims).__name__}"
+            )
+        decoded: list[StatisticsClaim] = []
+        for index, item in enumerate(claims):
+            if not isinstance(item, dict):
+                raise ArtifactDecodeError(
+                    f"{cls.__name__}.from_dict 字段 'claims' 的第 {index} 个元素"
+                    f"期望 dict，实际为 {type(item).__name__}"
+                )
+            decoded.append(StatisticsClaim.from_dict(item))
+        return cls(
+            computed_p_values=_require_float_list(
+                data, "computed_p_values", cls.__name__
+            ),
+            claims=decoded,
+        )
 
 
 def _is_matched(

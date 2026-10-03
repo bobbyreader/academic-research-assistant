@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Protocol
 
 from core.http_client import HttpClientError, UrllibTransport
-from core.research_models import PaperRecord
+from core.research_models import ArtifactDecodeError, PaperRecord
 
 #: Matches the ``[P1]``-style citation markers the writing prompt mandates.
 MARKER_PATTERN = re.compile(r"\[P(\d+)\]")
@@ -39,6 +39,76 @@ class DoiResolver(Protocol):
     """Resolve a DOI to a boolean ``(resolved, error)`` outcome."""
 
     def resolve(self, doi: str) -> tuple[bool, str | None]: ...
+
+
+# --------------------------------------------------------------------------- #
+# 反序列化校验：结构非法一律抛 ValueError（绝不静默构造半个对象）
+# --------------------------------------------------------------------------- #
+def _require_object(value: object, owner: str) -> dict:
+    """要求是映射（dict）；否则抛 ``ValueError``。"""
+    if not isinstance(value, dict):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 期望 payload 为 dict，实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_str(data: dict, field: str, owner: str) -> str:
+    value = data.get(field)
+    if not isinstance(value, str):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 str，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_optional_str(data: dict, field: str, owner: str) -> str | None:
+    value = data.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 str 或 null，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_int(data: dict, field: str, owner: str) -> int:
+    value = data.get(field)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 int，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_bool(data: dict, field: str, owner: str) -> bool:
+    value = data.get(field)
+    if not isinstance(value, bool):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 bool，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_str_list(data: dict, field: str, owner: str) -> list[str]:
+    value = data.get(field)
+    if not isinstance(value, list):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 list[str]，"
+            f"实际为 {type(value).__name__}"
+        )
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ArtifactDecodeError(
+                f"{owner}.from_dict 字段 '{field}' 的第 {index} 个元素期望 str，"
+                f"实际为 {type(item).__name__}"
+            )
+    return list(value)
 
 
 class CrossrefDoiResolver:
@@ -68,6 +138,17 @@ class DoiCheck:
     doi: str
     resolved: bool
     error: str | None = None
+
+    @classmethod
+    def from_dict(cls, payload: object) -> DoiCheck:
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。"""
+        data = _require_object(payload, cls.__name__)
+        return cls(
+            citation_id=_require_str(data, "citation_id", cls.__name__),
+            doi=_require_str(data, "doi", cls.__name__),
+            resolved=_require_bool(data, "resolved", cls.__name__),
+            error=_require_optional_str(data, "error", cls.__name__),
+        )
 
 
 @dataclass
@@ -122,6 +203,41 @@ class CitationVerificationReport:
             "doi_unresolved": self.unresolved_doi_count,
             "doi_checks": [asdict(check) for check in self.doi_checks],
         }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> CitationVerificationReport:
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。
+
+        ``passed``、``doi_verified``、``doi_unresolved`` 均为派生字段，重建时由
+        属性自动重算。
+        """
+        data = _require_object(payload, cls.__name__)
+        doi_checks = data.get("doi_checks")
+        if not isinstance(doi_checks, list):
+            raise ArtifactDecodeError(
+                f"{cls.__name__}.from_dict 字段 'doi_checks' 期望 list，"
+                f"实际为 {type(doi_checks).__name__}"
+            )
+        decoded: list[DoiCheck] = []
+        for index, item in enumerate(doi_checks):
+            if not isinstance(item, dict):
+                raise ArtifactDecodeError(
+                    f"{cls.__name__}.from_dict 字段 'doi_checks' 的第 {index} 个元素"
+                    f"期望 dict，实际为 {type(item).__name__}"
+                )
+            decoded.append(DoiCheck.from_dict(item))
+        return cls(
+            total_references=_require_int(data, "total_references", cls.__name__),
+            cited_markers=_require_str_list(data, "cited_markers", cls.__name__),
+            unknown_markers=_require_str_list(data, "unknown_markers", cls.__name__),
+            unused_references=_require_str_list(
+                data, "unused_references", cls.__name__
+            ),
+            references_without_doi=_require_str_list(
+                data, "references_without_doi", cls.__name__
+            ),
+            doi_checks=decoded,
+        )
 
 
 def verify_citations(

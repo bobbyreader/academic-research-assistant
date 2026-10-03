@@ -42,6 +42,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from core.quote_grounding import is_quote_grounded
+from core.research_models import ArtifactDecodeError
 
 #: Reviewer roles, in priority order. ``reviewer_count`` truncates this tuple.
 REVIEWER_ROLES: tuple[str, ...] = ("methodology", "statistics", "novelty")
@@ -108,6 +109,17 @@ class ReviewConcern:
         """返回可序列化的字典，便于写入报告或做快照比较。"""
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, payload: object) -> ReviewConcern:
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。"""
+        data = _require_object(payload, cls.__name__)
+        return cls(
+            category=_require_str(data, "category", cls.__name__),
+            severity=_require_str(data, "severity", cls.__name__),
+            statement=_require_str(data, "statement", cls.__name__),
+            evidence=_require_str(data, "evidence", cls.__name__),
+        )
+
 
 @dataclass
 class ReviewerReport:
@@ -137,6 +149,27 @@ class ReviewerReport:
             "score": self.score,
         }
 
+    @classmethod
+    def from_dict(cls, payload: object) -> ReviewerReport:
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。
+
+        ``concern_count`` 与 ``major_concern_count`` 是派生字段，重建时由
+        :attr:`major_concerns` 自动重算。
+        """
+        data = _require_object(payload, cls.__name__)
+        concerns_payload = _require_list(data, "concerns", cls.__name__)
+        return cls(
+            reviewer_role=_require_str(data, "reviewer_role", cls.__name__),
+            summary=_require_str(data, "summary", cls.__name__),
+            strengths=_require_str_list(data, "strengths", cls.__name__),
+            concerns=[
+                _decode_nested(item, ReviewConcern, "concerns", cls.__name__)
+                for item in concerns_payload
+            ],
+            recommendation=_require_str(data, "recommendation", cls.__name__),
+            score=_require_int(data, "score", cls.__name__),
+        )
+
 
 @dataclass
 class PeerReviewBundle:
@@ -157,6 +190,22 @@ class PeerReviewBundle:
             "author_checks": list(self.author_checks),
             "warnings": list(self.warnings),
         }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> PeerReviewBundle:
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。"""
+        data = _require_object(payload, cls.__name__)
+        reports_payload = _require_list(data, "reports", cls.__name__)
+        return cls(
+            reports=[
+                _decode_nested(item, ReviewerReport, "reports", cls.__name__)
+                for item in reports_payload
+            ],
+            synthesis=_require_str(data, "synthesis", cls.__name__),
+            decision=_require_str(data, "decision", cls.__name__),
+            author_checks=_require_str_list(data, "author_checks", cls.__name__),
+            warnings=_require_str_list(data, "warnings", cls.__name__),
+        )
 
     def to_markdown(self) -> str:
         """渲染为人类可读的 Markdown 评审报告。"""
@@ -617,6 +666,73 @@ def _author_checks(decision: str) -> list[str]:
             "必须修正，不得忽略。"
         ),
     ]
+
+
+# --------------------------------------------------------------------------- #
+# 反序列化校验：结构非法一律抛 ValueError（绝不静默构造半个对象）
+# --------------------------------------------------------------------------- #
+def _require_object(value: object, owner: str) -> dict[str, Any]:
+    """要求是映射（dict）；否则抛 ``ValueError``。"""
+    if not isinstance(value, dict):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 期望 payload 为 dict，实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _decode_nested(value: object, expected_type: Any, field: str, owner: str) -> Any:
+    """要求嵌套元素是 ``expected_type`` 的 ``to_dict`` 输出（dict）。
+
+    ``expected_type`` 声明为 ``Any``：这里按鸭子类型调用其 ``from_dict``，
+    交给各类型自身的严格校验，避免 mypy 对 ``type`` 无 ``from_dict`` 属性的误报。
+    """
+    if not isinstance(value, dict):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 期望字段 '{field}' 的每个元素为 dict，"
+            f"实际为 {type(value).__name__}"
+        )
+    return expected_type.from_dict(value)
+
+
+def _require_str(data: dict[str, Any], field: str, owner: str) -> str:
+    value = data.get(field)
+    if not isinstance(value, str):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 str，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_int(data: dict[str, Any], field: str, owner: str) -> int:
+    value = data.get(field)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 int，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_list(data: dict[str, Any], field: str, owner: str) -> list[Any]:
+    value = data.get(field)
+    if not isinstance(value, list):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 list，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_str_list(data: dict[str, Any], field: str, owner: str) -> list[str]:
+    value = _require_list(data, field, owner)
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ArtifactDecodeError(
+                f"{owner}.from_dict 字段 '{field}' 的第 {index} 个元素期望 str，"
+                f"实际为 {type(item).__name__}"
+            )
+    return list(value)
 
 
 def review_manuscript(

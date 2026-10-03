@@ -9,12 +9,13 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, ClassVar, Literal, cast
 
 from core.artifact_store import ArtifactStore
 from core.export_service import export_pdf, export_pptx
 from core.research_pipeline import PipelineResult
 from core.research_service import ResearchService
+from core.resume import RESUME_STEPS
 from core.state_manager import ProjectState, StateManager, WorkflowStage
 
 # 类型别名
@@ -65,7 +66,6 @@ class Orchestrator:
         # 创建项目目录结构
         project_dir.mkdir(parents=True)
         (project_dir / "artifacts").mkdir()
-        (project_dir / "checkpoints").mkdir()
 
         # 初始化项目状态
         state = ProjectState(
@@ -84,6 +84,49 @@ class Orchestrator:
     ) -> PipelineResult:
         """Run real search, LLM analysis, drafting, and artifact persistence."""
         return self.research_service.run(project_name, topic, **options)
+
+    #: 会产生 LLM 调用的阶段。用于判定"本次是否调用过模型"，而不是凭感觉断言。
+    _LLM_STEPS: ClassVar[tuple[str, ...]] = ("analysis", "claims", "writing", "review")
+
+    def report_resume(self, result: PipelineResult) -> None:
+        """Print the truth about what was reused, derived from actual data.
+
+        Two scopes are kept strictly separate and each is labelled:
+
+        * **判定 (plan)** — ``resume_plan``: what the pre-run decision *planned* to
+          skip, and why it could not skip more. This is a prediction and may be
+          more optimistic than reality.
+        * **实际 (actual)** — ``resume_note``: what actually got reused, generated
+          from the real ``reused_steps``. The stage-level fact has this single
+          source; we must not re-list the stages ourselves.
+
+        Merging the two would reintroduce the "prediction reported as fact" defect,
+        so they are never combined. The cost verdict below is *computed* from
+        ``reused_steps``: reuse is only a contiguous prefix, so a run may reuse
+        ``search``/``analysis`` while redoing ``writing`` — the literature was then
+        *not* re-searched but the model *was* re-called.
+        """
+        reused = list(getattr(result, "reused_steps", []) or [])
+        plan = getattr(result, "resume_plan", "") or ""
+        note = getattr(result, "resume_note", "") or ""
+
+        print("\n[续跑] 判定：" + (plan or "本次未提供续跑判定"))
+        print("[续跑] 实际：" + (note or "本次未提供续跑说明"))
+
+        if "search" in reused:
+            print("[续跑] 本次没有重新检索文献（search 已复用）。")
+        else:
+            print("[续跑] 本次重新检索了文献（search 未复用）。")
+
+        redone = [step for step in RESUME_STEPS if step not in reused]
+        llm_redone = [step for step in self._LLM_STEPS if step in redone]
+        if llm_redone:
+            print(
+                "[续跑] 本次重新调用了模型（重做阶段："
+                f"{'、'.join(llm_redone)}）。"
+            )
+        else:
+            print("[续跑] 本次没有重新调用模型（全部会产生模型调用的阶段都已复用）。")
 
     def show_status(self, project_name: str) -> None:
         """显示项目状态。
@@ -324,6 +367,11 @@ def main() -> None:
     research_parser.add_argument(
         "--export", default="md", help="导出格式：md、pdf、pptx 或 all"
     )
+    research_parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="强制全新运行：不复用该项目已有的产物，重新执行全部阶段",
+    )
 
     # status 命令
     status_parser = subparsers.add_parser("status", help="查看项目状态")
@@ -363,7 +411,7 @@ def main() -> None:
                 orchestrator.init_project(args.project_name, args.mode)
             else:
                 print(f"[INFO] 复用已有项目 '{args.project_name}' 并创建新版本产物")
-            orchestrator.run_real_research(
+            result = orchestrator.run_real_research(
                 args.project_name,
                 args.topic,
                 sources=[item.strip() for item in args.sources.split(",") if item.strip()],
@@ -372,7 +420,9 @@ def main() -> None:
                 provider=args.provider,
                 model=args.model,
                 base_url=args.base_url,
+                resume=not args.no_resume,
             )
+            orchestrator.report_resume(result)
             # argparse cannot narrow a free-form string to a Literal, and
             # --export accepts arbitrary values; Orchestrator.export validates.
             formats: list[ExportFormat] = (

@@ -278,6 +278,19 @@ def test_pipeline_with_dataset_produces_statistics_figures_and_traceability(
     assert figures["figures"], "expected at least one figure for a numeric column"
     figure_types = {figure["figure_type"] for figure in figures["figures"]}
     assert "distribution" in figure_types
+    # `path` 必须指向项目内真实保存的图件，绝不记录运行期临时目录的悬空路径
+    # （临时目录在运行结束时已被删除，写进持久化产物等于记录一个保证失效的位置）。
+    # 记录的是相对项目根目录的路径，以保证产物可移植且确定。
+    project_dir = tmp_path / "projects/dataset"
+    for figure in figures["figures"]:
+        stored = Path(figure["path"])
+        assert not stored.is_absolute(), f"figures.json 记录了绝对路径: {stored}"
+        assert "research-figures-" not in str(stored), (
+            f"figures.json 记录了临时目录路径: {stored}"
+        )
+        real = project_dir / stored
+        assert real.is_file(), f"figures.json 记录了不存在的图件路径: {real}"
+        assert real == artifacts / "visualization" / f"{figure['filename']}.v1"
 
     manuscript = result.manuscript_path.read_text(encoding="utf-8")
     assert "# 推断统计分析报告" in manuscript  # statistics injected by the system
@@ -289,6 +302,57 @@ def test_pipeline_with_dataset_produces_statistics_figures_and_traceability(
     )
     assert verification["passed"] is True
     assert verification["computed_p_values"], "computed p-values must be recorded"
+
+
+def test_two_fresh_runs_produce_byte_identical_artifacts(tmp_path: Path) -> None:
+    """确定性：相同输入、相同种子，全新运行的产物必须**逐字节**一致。
+
+    这要求产物里不出现任何随运行变化的量（例如运行期临时目录的绝对路径）。
+    若某处退回记录临时路径，本测试会立刻失败。
+    """
+    import hashlib
+
+    data = tmp_path / "data.csv"
+    data.write_text(
+        "group,score\nA,1\nA,2\nA,3\nA,4\nA,5\nB,6\nB,7\nB,8\nB,9\nB,10\n",
+        encoding="utf-8",
+    )
+    body = "# Draft\n\nA difference was observed [P1] (p = 0.001).\n"
+
+    def run_into(project_name: str) -> dict[str, str]:
+        pipeline = ResearchPipeline(
+            ArtifactStore(tmp_path / "projects"),
+            searcher=FakeSearcher(),
+            llm_client=FakeLLM(body=body),
+            doi_resolver=FakeResolver(),
+        )
+        pipeline.run(
+            ResearchPipelineConfig(
+                project_name=project_name,
+                topic="climate adaptation",
+                sources=["crossref"],
+                max_results=2,
+                data_path=data,
+            )
+        )
+        base = tmp_path / "projects" / project_name / "artifacts"
+        digests: dict[str, str] = {}
+        for path in sorted(base.rglob("*.v*")):
+            if path.name.endswith(".meta"):
+                continue
+            digests[str(path.relative_to(base))] = hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+        return digests
+
+    first = run_into("determinism_a")
+    second = run_into("determinism_b")
+
+    assert first, "expected the run to produce artifacts"
+    assert first == second, (
+        "两次全新运行的产物不逐字节一致："
+        f"{sorted(set(first) ^ set(second)) or [k for k in first if first[k] != second.get(k)]}"
+    )
 
 
 def test_pipeline_flags_invented_p_value_when_dataset_present(tmp_path: Path) -> None:
@@ -561,23 +625,6 @@ def test_load_tolerates_removed_stage_names(tmp_path: Path) -> None:
     assert state.stage_status[WorkflowStage.LIT_REVIEW] == "completed"
     assert state.stage_status[WorkflowStage.WRITING] == "in_progress"
     assert state.stage_status[WorkflowStage.EXPORT] == "pending"
-
-
-def test_load_latest_checkpoint_tolerates_removed_stage_names(tmp_path: Path) -> None:
-    """checkpoint 与 state.json 一样容忍已删除的阶段名。"""
-    projects_dir = tmp_path / "projects"
-    checkpoint_dir = projects_dir / "legacy" / "checkpoints"
-    checkpoint_dir.mkdir(parents=True)
-    (checkpoint_dir / "checkpoint_20240101_000000.json").write_text(
-        json.dumps(_legacy_state_payload(), ensure_ascii=False), encoding="utf-8"
-    )
-
-    state = StateManager(projects_dir).load_latest_checkpoint("legacy")
-
-    assert state is not None
-    assert state.current_stage is WorkflowStage.WRITING
-    assert set(state.stage_status) == set(WorkflowStage)
-    assert state.stage_status[WorkflowStage.WRITING] == "in_progress"
 
 
 def test_current_stage_falls_back_to_export_when_everything_completed(

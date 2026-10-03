@@ -15,6 +15,12 @@ from core.research_pipeline import (
     ResearchPipeline,
     ResearchPipelineConfig,
 )
+from core.resume import (
+    COMPLETED_STEPS_KEY,
+    RunFingerprint,
+    parse_recorded_steps,
+    plan_resume,
+)
 from core.state_manager import StateManager, WorkflowStage
 
 
@@ -44,6 +50,7 @@ class ResearchService:
         api_key: str | None = None,
         base_url: str | None = None,
         on_progress: Callable[[str, str], None] | None = None,
+        resume: bool = True,
     ) -> PipelineResult:
         # Validate configuration before touching any state or network resource:
         # a broken settings file must fail in under a second with the offending
@@ -108,6 +115,25 @@ class ResearchService:
         active_stage = WorkflowStage.SEARCH
         state.stage_status[WorkflowStage.BRAINSTORMING] = "completed"
         state.stage_status[WorkflowStage.SEARCH] = "in_progress"
+
+        # 本次运行的输入指纹。它与"上一次运行记录下来的分阶段指纹"一起决定哪些
+        # 阶段可以安全跳过（见 core/resume.py 的第一性原理）。
+        fingerprint = RunFingerprint.build(
+            topic=topic,
+            sources=sources,
+            max_results=max_results,
+            data_path=data_path,
+            reviewer_count=reviewer_count,
+            figure_dpi=figure_dpi,
+        )
+        previous_steps = parse_recorded_steps(state.metadata.get(COMPLETED_STEPS_KEY))
+        decision = plan_resume(
+            artifact_store=self.artifact_store,
+            project_name=project_name,
+            fingerprint=fingerprint,
+            previous_steps=previous_steps,
+            enabled=resume,
+        )
         self.state_manager.save(state)
 
         def progress(stage_name: str, status: str) -> None:
@@ -123,8 +149,15 @@ class ResearchService:
             active_stage = next_stage
             state.current_stage = active_stage
             state.stage_status[active_stage] = status
+            # 安全性的关键：指纹必须在该阶段产物**已经落盘之后**才被记录。进度回调
+            # 的 "completed" 标记恰好触发在产物写完之后（见 core/research_pipeline.py），
+            # 因此这里记录指纹等价于“该阶段的产物确实与本次输入对应”。先写指纹，
+            # 再 save，保证"输入变了但产物还没写出来"不会被误判为可复用。
+            if status == "completed":
+                recorded = state.metadata.setdefault(COMPLETED_STEPS_KEY, {})
+                if isinstance(recorded, dict):
+                    recorded[stage_name] = fingerprint.to_dict()
             self.state_manager.save(state)
-            self.state_manager.save_checkpoint(project_name, state)
             if on_progress:
                 on_progress(stage_name, status)
 
@@ -157,6 +190,7 @@ class ResearchService:
                 progress=progress,
                 reviewer_count=reviewer_count,
                 figure_dpi=figure_dpi,
+                resume=decision,
             )
             result = pipeline.run(
                 ResearchPipelineConfig(

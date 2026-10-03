@@ -44,7 +44,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from core.quote_grounding import is_quote_grounded
-from core.research_models import PaperRecord
+from core.research_models import ArtifactDecodeError, PaperRecord
 
 #: Allowed ``verdict`` values, ordered from most to least favourable.
 VERDICTS: tuple[str, ...] = (
@@ -131,6 +131,23 @@ class ClaimEvidence:
         """返回可序列化的字典，便于写入报告或做快照比较。"""
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, payload: object) -> ClaimEvidence:
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。"""
+        data = _require_object(payload, cls.__name__)
+        return cls(
+            citation_id=_require_str(data, "citation_id", cls.__name__),
+            paper_title=_require_str(data, "paper_title", cls.__name__),
+            verdict=_require_str(data, "verdict", cls.__name__),
+            quote=_require_str(data, "quote", cls.__name__),
+            rationale=_require_str(data, "rationale", cls.__name__),
+        )
+
+    @staticmethod
+    def _from_payload(payload: object) -> ClaimEvidence:
+        """内部便捷入口（等价于 :meth:`from_dict`）。"""
+        return ClaimEvidence.from_dict(payload)
+
 
 @dataclass
 class ClaimVerdict:
@@ -168,6 +185,31 @@ class ClaimVerdict:
             "note": self.note,
             "evidence": [item.to_dict() for item in self.evidence],
         }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> ClaimVerdict:
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。
+
+        ``to_dict`` 中的 ``overall`` 是派生字段（由 ``evidence`` 计算），这里仅
+        接受其存在与否，重建时由属性自动重算，绝不把它喂回构造器。
+        """
+        data = _require_object(payload, cls.__name__)
+        evidence_payload = _require_list(data, "evidence", cls.__name__)
+        return cls(
+            index=_require_int(data, "index", cls.__name__),
+            claim=_require_str(data, "claim", cls.__name__),
+            citation_ids=_require_str_list(data, "citation_ids", cls.__name__),
+            evidence=[
+                _decode_nested(item, ClaimEvidence, "evidence", cls.__name__)
+                for item in evidence_payload
+            ],
+            note=_require_str(data, "note", cls.__name__),
+        )
+
+    @staticmethod
+    def _from_payload(payload: object) -> ClaimVerdict:
+        """内部便捷入口（等价于 :meth:`from_dict`）。"""
+        return ClaimVerdict.from_dict(payload)
 
 
 @dataclass
@@ -207,6 +249,24 @@ class ClaimVerificationReport:
             "author_checks": list(self.author_checks),
             "claims": [claim.to_dict() for claim in self.claims],
         }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> ClaimVerificationReport:
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。
+
+        ``passed``、``claim_count``、``unsupported_count``、
+        ``claims_without_evidence_count`` 均为派生字段，重建时由属性自动重算。
+        """
+        data = _require_object(payload, cls.__name__)
+        claims_payload = _require_list(data, "claims", cls.__name__)
+        return cls(
+            claims=[
+                _decode_nested(item, ClaimVerdict, "claims", cls.__name__)
+                for item in claims_payload
+            ],
+            warnings=_require_str_list(data, "warnings", cls.__name__),
+            author_checks=_require_str_list(data, "author_checks", cls.__name__),
+        )
 
     def to_markdown(self) -> str:
         """渲染为人类可读的 Markdown 报告。"""
@@ -719,6 +779,135 @@ def _dedupe(values: Sequence[str]) -> list[str]:
         seen.add(value)
         unique.append(value)
     return unique
+
+
+# --------------------------------------------------------------------------- #
+# 反序列化校验：结构非法一律抛 ValueError（绝不静默构造半个对象）
+# --------------------------------------------------------------------------- #
+def _require_object(value: object, owner: str) -> dict[str, Any]:
+    """要求是映射（dict）；否则抛 ``ValueError``。"""
+    if not isinstance(value, dict):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 期望 payload 为 dict，实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _decode_nested(value: object, expected_type: Any, field: str, owner: str) -> Any:
+    """要求嵌套元素是 ``expected_type`` 的 ``to_dict`` 输出（dict）。
+
+    ``expected_type`` 声明为 ``Any``：这里按鸭子类型调用其 ``from_dict``，
+    交给各类型自身的严格校验，避免 mypy 对 ``type`` 无 ``from_dict`` 属性的误报。
+    """
+    if not isinstance(value, dict):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 期望字段 '{field}' 的每个元素为 dict，"
+            f"实际为 {type(value).__name__}"
+        )
+    return expected_type.from_dict(value)
+
+
+def _require_str(data: dict[str, Any], field: str, owner: str) -> str:
+    value = data.get(field)
+    if not isinstance(value, str):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 str，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_int(data: dict[str, Any], field: str, owner: str) -> int:
+    value = data.get(field)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 int，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_float(data: dict[str, Any], field: str, owner: str) -> float:
+    value = data.get(field)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 float，"
+            f"实际为 {type(value).__name__}"
+        )
+    return float(value)
+
+
+def _require_bool(data: dict[str, Any], field: str, owner: str) -> bool:
+    value = data.get(field)
+    if not isinstance(value, bool):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 bool，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_optional_float(
+    data: dict[str, Any], field: str, owner: str
+) -> float | None:
+    value = data.get(field)
+    if value is None:
+        return None
+    return _require_float(data, field, owner)
+
+
+def _require_optional_str(data: dict[str, Any], field: str, owner: str) -> str | None:
+    value = data.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 str 或 null，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_str_list(data: dict[str, Any], field: str, owner: str) -> list[str]:
+    value = data.get(field)
+    if not isinstance(value, list):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 list[str]，"
+            f"实际为 {type(value).__name__}"
+        )
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ArtifactDecodeError(
+                f"{owner}.from_dict 字段 '{field}' 的第 {index} 个元素期望 str，"
+                f"实际为 {type(item).__name__}"
+            )
+    return list(value)
+
+
+def _require_list(data: dict[str, Any], field: str, owner: str) -> list[Any]:
+    value = data.get(field)
+    if not isinstance(value, list):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 list，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_float_list(data: dict[str, Any], field: str, owner: str) -> list[float]:
+    value = data.get(field)
+    if not isinstance(value, list):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 list[float]，"
+            f"实际为 {type(value).__name__}"
+        )
+    for index, item in enumerate(value):
+        if not isinstance(item, (int, float)) or isinstance(item, bool):
+            raise ArtifactDecodeError(
+                f"{owner}.from_dict 字段 '{field}' 的第 {index} 个元素期望数值，"
+                f"实际为 {type(item).__name__}"
+            )
+    return [float(item) for item in value]
 
 
 def _author_checks() -> list[str]:

@@ -22,6 +22,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from core.research_models import ArtifactDecodeError
+
 # 显著性水平与校正方法的允许取值
 _ALPHA = 0.05
 _CORRECTION_METHODS = {"holm", "none"}
@@ -42,6 +44,83 @@ _EFFECT_SIZE_THRESHOLDS = {"small": 0.2, "medium": 0.5, "large": 0.8}
 
 class StatisticsError(ValueError):
     """当可选数据文件无法被安全地做统计推断时抛出。"""
+
+
+# --------------------------------------------------------------------------- #
+# 反序列化校验：结构非法一律抛 ValueError（绝不静默构造半个对象）
+# --------------------------------------------------------------------------- #
+def _require_object(value: object, owner: str) -> dict:
+    """要求是映射（dict）；否则抛 ``ValueError``。"""
+    if not isinstance(value, dict):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 期望 payload 为 dict，实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_str(data: dict, field: str, owner: str) -> str:
+    value = data.get(field)
+    if not isinstance(value, str):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 str，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_optional_str(data: dict, field: str, owner: str) -> str | None:
+    value = data.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 str 或 null，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_int(data: dict, field: str, owner: str) -> int:
+    value = data.get(field)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 int，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_float(data: dict, field: str, owner: str) -> float:
+    value = data.get(field)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 float，"
+            f"实际为 {type(value).__name__}"
+        )
+    return float(value)
+
+
+def _require_optional_float(data: dict, field: str, owner: str) -> float | None:
+    value = data.get(field)
+    if value is None:
+        return None
+    return _require_float(data, field, owner)
+
+
+def _require_str_list(data: dict, field: str, owner: str) -> list[str]:
+    value = data.get(field)
+    if not isinstance(value, list):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 list[str]，"
+            f"实际为 {type(value).__name__}"
+        )
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ArtifactDecodeError(
+                f"{owner}.from_dict 字段 '{field}' 的第 {index} 个元素期望 str，"
+                f"实际为 {type(item).__name__}"
+            )
+    return list(value)
 
 
 @dataclass
@@ -79,6 +158,26 @@ class StatTestResult:
             "assumptions": list(self.assumptions),
             "warnings": list(self.warnings),
         }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> StatTestResult:
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。"""
+        data = _require_object(payload, cls.__name__)
+        return cls(
+            test_name=_require_str(data, "test_name", cls.__name__),
+            variables=_require_str_list(data, "variables", cls.__name__),
+            groups=_require_str_list(data, "groups", cls.__name__),
+            n=_require_int(data, "n", cls.__name__),
+            statistic=_require_float(data, "statistic", cls.__name__),
+            p_value=_require_float(data, "p_value", cls.__name__),
+            p_value_adjusted=_require_float(data, "p_value_adjusted", cls.__name__),
+            effect_size=_require_float(data, "effect_size", cls.__name__),
+            effect_size_name=_require_str(data, "effect_size_name", cls.__name__),
+            ci_low=_require_optional_float(data, "ci_low", cls.__name__),
+            ci_high=_require_optional_float(data, "ci_high", cls.__name__),
+            assumptions=_require_str_list(data, "assumptions", cls.__name__),
+            warnings=_require_str_list(data, "warnings", cls.__name__),
+        )
 
     def to_markdown_row(self) -> str:
         """渲染为 Markdown 表格的一行（不含表头）。"""
@@ -125,6 +224,38 @@ class StatisticsReport:
             "author_checks": list(self.author_checks),
             "warnings": list(self.warnings),
         }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> StatisticsReport:
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。"""
+        data = _require_object(payload, cls.__name__)
+        tests = data.get("tests")
+        if not isinstance(tests, list):
+            raise ArtifactDecodeError(
+                f"{cls.__name__}.from_dict 字段 'tests' 期望 list，"
+                f"实际为 {type(tests).__name__}"
+            )
+        decoded: list[StatTestResult] = []
+        for index, item in enumerate(tests):
+            if not isinstance(item, dict):
+                raise ArtifactDecodeError(
+                    f"{cls.__name__}.from_dict 字段 'tests' 的第 {index} 个元素"
+                    f"期望 dict，实际为 {type(item).__name__}"
+                )
+            decoded.append(StatTestResult.from_dict(item))
+        return cls(
+            rows=_require_int(data, "rows", cls.__name__),
+            numeric_columns=_require_str_list(data, "numeric_columns", cls.__name__),
+            categorical_columns=_require_str_list(
+                data, "categorical_columns", cls.__name__
+            ),
+            group_column=_require_optional_str(data, "group_column", cls.__name__),
+            alpha=_require_float(data, "alpha", cls.__name__),
+            correction_method=_require_str(data, "correction_method", cls.__name__),
+            tests=decoded,
+            author_checks=_require_str_list(data, "author_checks", cls.__name__),
+            warnings=_require_str_list(data, "warnings", cls.__name__),
+        )
 
     def to_markdown(self) -> str:
         """渲染为 Markdown 报告（含假设列表与作者核对清单）。"""

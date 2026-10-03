@@ -350,3 +350,297 @@ def test_invalid_config_fails_fast_and_breaks_nothing(tmp_path: Path) -> None:
     reloaded = state_manager.load("badcfg")
     assert reloaded is not None
     assert reloaded.stage_status[WorkflowStage.SEARCH] == "pending"
+
+
+# ==========================================================================
+# Resume (断点续跑): the user's real chain must skip only what is provably safe
+# ==========================================================================
+#
+# These tests walk the same real path as the rest of this file
+# (Orchestrator -> ResearchService -> ResearchPipeline). Only the outside world
+# is faked, and the fakes count their own calls, so "no search, no model call"
+# is asserted on the actual methods the pipeline would invoke.
+
+RESUME_STEPS = ("search", "analysis", "claims", "writing", "review")
+
+
+class CountingSearcher:
+    """A literature API that records how many times it was actually queried."""
+
+    def __init__(self) -> None:
+        self.search_calls = 0
+        self.queries: list[str] = []
+
+    def search(self, query: str, sources: list[str], max_results: int) -> SearchReport:
+        self.search_calls += 1
+        self.queries.append(query)
+        return SearchReport(
+            papers=[
+                PaperRecord(
+                    title="Climate adaptation evidence",
+                    authors=["A Author"],
+                    year=2024,
+                    journal="Research Journal",
+                    doi="10.1234/climate",
+                    abstract="A finding.",
+                    source="crossref",
+                )
+            ],
+            errors=[],
+            sources_attempted=list(sources),
+            counts_by_source={name: 1 for name in sources},
+        )
+
+
+class CountingLLM:
+    """A model client that records every call, split by kind."""
+
+    def __init__(self) -> None:
+        self.complete_calls = 0
+        self.complete_json_calls = 0
+
+    def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+        self.complete_json_calls += 1
+        if "事实核查员" in system_prompt:
+            return {
+                "verdicts": [
+                    {
+                        "claim_index": 0,
+                        "claim": "Adaptation is context-dependent",
+                        "citation_id": "P1",
+                        "verdict": "supports",
+                        "quote": "A finding.",
+                        "rationale": "摘要直接支持该论断。",
+                    }
+                ]
+            }
+        if "审稿人" in system_prompt:
+            return {
+                "summary": "结构清晰，证据强度有限。",
+                "strengths": ["主题明确"],
+                "concerns": [
+                    {
+                        "category": "methodology",
+                        "severity": "minor",
+                        "statement": "样本描述不足",
+                        "evidence": "A difference was observed",
+                    }
+                ],
+                "recommendation": "minor_revision",
+                "score": 65,
+            }
+        return {
+            "research_question": "How does climate adaptation work?",
+            "key_findings": [
+                {"claim": "Adaptation is context-dependent", "citation_ids": ["P1"]}
+            ],
+            "research_gaps": ["More longitudinal evidence is needed"],
+            "proposed_methods": ["Compare cohorts over time"],
+        }
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        self.complete_calls += 1
+        return "# Draft\n\nA difference was observed [P1] (p = 0.001).\n"
+
+
+class ResumeHarness:
+    """Drive the real chain repeatedly, sharing one pair of counting fakes.
+
+    The service constructs its searcher and model client on every run, so the
+    fakes must be *reused* across runs for their counts to mean anything. Patching
+    the factory functions to return these shared objects does exactly that.
+    """
+
+    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.tmp_path = tmp_path
+        self.searcher = CountingSearcher()
+        self.llm = CountingLLM()
+        self.orchestrator = Orchestrator(tmp_path)
+        self.orchestrator.init_project("resume", "hybrid")
+        self.data = tmp_path / "data.csv"
+        self.data.write_text(DATASET, encoding="utf-8")
+
+        monkeypatch.setattr(
+            "core.research_service.LiteratureSearcher.from_config",
+            lambda **kwargs: self.searcher,
+        )
+        monkeypatch.setattr(
+            "core.research_service.build_llm_client", lambda **kwargs: self.llm
+        )
+        monkeypatch.setattr("core.citation_verifier.CrossrefDoiResolver", FakeResolver)
+
+    def run(self, topic: str = "climate adaptation", *, resume: bool = True):
+        return self.orchestrator.run_real_research(
+            "resume",
+            topic,
+            sources=["crossref"],
+            max_results=2,
+            data_path=self.data,
+            resume=resume,
+        )
+
+    def latest(self, stage: str, filename: str) -> Path:
+        path = self.orchestrator.artifact_store.get_artifact(
+            "resume", stage, filename
+        )
+        assert path is not None, f"{stage}/{filename} was never written"
+        return path
+
+
+def test_resume_reruns_nothing_when_inputs_are_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The core promise: identical inputs => no literature API call, no model call.
+
+    This is the whole point of resuming. If it ever regressed, the user would pay
+    twice for the same run without noticing.
+    """
+    harness = ResumeHarness(tmp_path, monkeypatch)
+
+    first = harness.run()
+    assert harness.searcher.search_calls == 1
+    assert harness.llm.complete_calls == 1
+    assert harness.llm.complete_json_calls >= 1  # analysis (+ claim gate + review)
+    assert first.reused_steps == [], "the first run must not reuse anything"
+
+    searches_after_first = harness.searcher.search_calls
+    completes_after_first = harness.llm.complete_calls
+    json_after_first = harness.llm.complete_json_calls
+
+    manuscript_v1 = harness.latest("writing", "manuscript.md")
+    manuscript_text = manuscript_v1.read_text(encoding="utf-8")
+
+    second = harness.run()
+
+    # --- the outside world was not touched again ---------------------------
+    assert harness.searcher.search_calls == searches_after_first, (
+        "a resumed run re-queried the literature API"
+    )
+    assert harness.llm.complete_calls == completes_after_first, (
+        "a resumed run re-called the language model"
+    )
+    assert harness.llm.complete_json_calls == json_after_first
+
+    # --- everything was reused, and the result says so ---------------------
+    assert second.reused_steps == list(RESUME_STEPS), (
+        f"expected all stages reused, got {second.reused_steps}"
+    )
+    assert second.resume_note, "a resumed run must explain itself to the user"
+    assert "复用" in second.resume_note
+
+    # --- the artifacts were reused, not silently rewritten -----------------
+    assert harness.latest("writing", "manuscript.md") == manuscript_v1, (
+        "resuming wrote a new manuscript version instead of reusing the existing one"
+    )
+    assert (
+        harness.latest("writing", "manuscript.md").read_text(encoding="utf-8")
+        == manuscript_text
+    )
+
+
+def test_resume_after_crash_reuses_prefix_and_redoes_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing late artifact must redrive only the late stages.
+
+    Reuse is a contiguous prefix: once ``writing`` cannot be reused, ``review``
+    cannot either, even though its artifacts still exist on disk.
+    """
+    harness = ResumeHarness(tmp_path, monkeypatch)
+    harness.run()
+
+    # Simulate a crash after the earlier stages: the manuscript never landed.
+    manuscript = harness.latest("writing", "manuscript.md")
+    manuscript.unlink()
+
+    searches_before = harness.searcher.search_calls
+
+    result = harness.run()
+
+    # Search was reused (no new API call), but writing was redone.
+    assert harness.searcher.search_calls == searches_before, (
+        "the crash reran search even though its artifacts were intact"
+    )
+    assert result.reused_steps == ["search", "analysis", "claims"], (
+        f"expected the prefix to stop before writing, got {result.reused_steps}"
+    )
+    assert "writing" not in result.reused_steps
+    assert "review" not in result.reused_steps
+
+    # The final deliverable is complete again.
+    restored = harness.latest("writing", "manuscript.md")
+    assert restored.is_file() and restored.stat().st_size > 0
+    body = restored.read_text(encoding="utf-8")
+    assert "## References" in body and "# 图表清单" in body
+
+
+def test_changing_the_topic_reuses_no_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression guard against answering a *new* question with *old* artifacts.
+
+    This is the dangerous failure mode: a reused search would still satisfy every
+    downstream gate, producing a manuscript that looks fully verified yet answers
+    the previous topic. Reuse must be refused outright.
+    """
+    harness = ResumeHarness(tmp_path, monkeypatch)
+    first = harness.run("climate adaptation")
+    assert first.reused_steps == []
+
+    second = harness.run("quantum computing for medicine")
+
+    assert second.reused_steps == [], (
+        "a changed topic reused old artifacts — the run would answer the wrong question"
+    )
+    assert harness.searcher.search_calls == 2, (
+        "a changed topic must re-query the literature API"
+    )
+    assert harness.searcher.queries[-1] == "quantum computing for medicine"
+
+    assert second.resume_plan, "a changed input must be explained, not just felt"
+    assert "运行输入已变化" in second.resume_plan, (
+        "the plan must name the reason nothing could be reused"
+    )
+    assert "研究主题" in second.resume_plan
+
+    # The CLI must present the reason *and* the fact, each labelled, together.
+    Orchestrator(tmp_path).report_resume(second)
+    out = capsys.readouterr().out
+    assert "[续跑] 判定：" in out and "运行输入已变化" in out
+    assert "[续跑] 实际：" in out and "未复用任何旧产物" in out
+
+
+def test_resume_matches_a_fresh_run_and_no_resume_forces_reruns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed manuscript must equal a fresh one; ``--no-resume`` must rerun all.
+
+    Two independent guarantees: resuming is not allowed to change the deliverable,
+    and forcing a fresh run is not allowed to silently reuse anything.
+    """
+    harness = ResumeHarness(tmp_path, monkeypatch)
+
+    harness.run()
+    fresh_text = harness.latest("writing", "manuscript.md").read_text(encoding="utf-8")
+
+    second = harness.run()
+    assert second.reused_steps == list(RESUME_STEPS)
+    resumed_text = harness.latest("writing", "manuscript.md").read_text(
+        encoding="utf-8"
+    )
+    assert resumed_text == fresh_text, (
+        "resuming produced a manuscript different from a fresh run"
+    )
+
+    searches_before = harness.searcher.search_calls
+    completes_before = harness.llm.complete_calls
+
+    forced = harness.run(resume=False)
+
+    assert forced.reused_steps == [], "--no-resume still reused artifacts"
+    assert harness.searcher.search_calls == searches_before + 1, (
+        "--no-resume did not re-query the literature API"
+    )
+    assert harness.llm.complete_calls == completes_before + 1, (
+        "--no-resume did not re-call the model"
+    )

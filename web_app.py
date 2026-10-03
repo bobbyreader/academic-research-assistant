@@ -18,8 +18,12 @@ from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.utils import secure_filename
 
 from core.artifact_store import ArtifactStore
+from core.resume import RESUME_STEPS
 from core.state_manager import ProjectState, StateManager
 from orchestrator import Orchestrator
+
+#: 会产生 LLM 调用的阶段：用于如实判断"本次是否调用过模型"。
+_LLM_STEPS = ("analysis", "claims", "writing", "review")
 
 SOURCES = {"crossref", "pubmed", "semantic_scholar", "arxiv"}
 EXPORTS = {"md", "pdf", "pptx"}
@@ -47,6 +51,10 @@ class WebJob:
     artifacts: list[dict[str, str]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
+    reused_steps: list[str] = field(default_factory=list)
+    resume_plan: str = ""
+    resume_note: str = ""
+    logs: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     finished_at: str | None = None
 
@@ -73,6 +81,13 @@ class JobManager:
                 else:
                     setattr(job, key, value)
 
+    def log(self, job_id: str, message: str) -> None:
+        """Append a human-readable line to the job's visible log."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None:
+                job.logs.append(message)
+
     def snapshot(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -92,6 +107,10 @@ class JobManager:
                 "artifacts": list(job.artifacts),
                 "warnings": list(job.warnings),
                 "error": job.error,
+                "reused_steps": list(job.reused_steps),
+                "resume_plan": job.resume_plan,
+                "resume_note": job.resume_note,
+                "logs": list(job.logs),
                 "created_at": job.created_at,
                 "finished_at": job.finished_at,
             }
@@ -116,6 +135,58 @@ def _list_value(value: Any, default: list[str]) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def _bool_value(value: Any, default: bool) -> bool:
+    """Interpret a form/JSON boolean leniently.
+
+    JSON sends a real bool, but an HTML form sends the string ``"false"`` or
+    ``"on"``. Anything unrecognised falls back to ``default`` (resume is ON by
+    default, matching the CLI).
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "on"}:
+        return True
+    if text in {"false", "0", "no", "off"}:
+        return False
+    return default
+
+
+def _resume_log_lines(
+    reused_steps: list[str], resume_plan: str, resume_note: str
+) -> list[str]:
+    """Build truthful log lines about reuse, derived from the actual stages.
+
+    Two scopes are kept separate and each is labelled, mirroring the CLI:
+
+    * **判定 (plan)** — ``resume_plan``: what the pre-run decision planned to skip
+      and why it could not skip more. A prediction, possibly more optimistic than
+      reality, so it is never merged with the fact line.
+    * **实际 (actual)** — ``resume_note``: the stage-level fact, single source.
+
+    The cost verdict is *computed* from ``reused_steps``: the web log is the user's
+    only view of what a run cost, so it must not claim "no model call" when a
+    model-calling stage was redone. ``reused_steps`` is a contiguous prefix, so a
+    run can reuse ``search`` yet still re-call the model.
+    """
+    lines = [f"判定：{resume_plan}" if resume_plan else "判定：本次未提供续跑判定"]
+    lines.append(f"实际：{resume_note}" if resume_note else "实际：本次未提供续跑说明")
+    lines.append(
+        "本次没有重新检索文献（search 已复用）。"
+        if "search" in reused_steps
+        else "本次重新检索了文献（search 未复用）。"
+    )
+    redone = [step for step in RESUME_STEPS if step not in reused_steps]
+    llm_redone = [step for step in _LLM_STEPS if step in redone]
+    if llm_redone:
+        lines.append(f"本次重新调用了模型（重做阶段：{'、'.join(llm_redone)}）。")
+    else:
+        lines.append("本次没有重新调用模型（会产生模型调用的阶段全部已复用）。")
+    return lines
 
 
 def _state_payload(state: ProjectState, artifacts: list[str]) -> dict[str, Any]:
@@ -247,6 +318,7 @@ def create_app(
             provider = str(payload.get("provider", "codex_cli")).strip().lower()
             if provider not in LLM_PROVIDERS:
                 raise ValueError("不支持的内容生成引擎")
+            resume = _bool_value(payload.get("resume"), default=True)
         except (TypeError, ValueError) as exc:
             return jsonify(error=str(exc)), 400
 
@@ -266,6 +338,11 @@ def create_app(
 
         def worker(current_job_id: str) -> None:
             jobs.update(current_job_id, status="running", stage_status={**job.stage_status, "search": "in_progress"})
+            jobs.log(
+                current_job_id,
+                "开始执行研究任务"
+                + ("" if resume else "（已选择全新运行，不复用旧产物）"),
+            )
             try:
                 runner = app.config["ORCHESTRATOR_FACTORY"](project_root)
                 if runner.state_manager.load(project_name) is None:
@@ -274,7 +351,7 @@ def create_app(
                 def on_progress(stage: str, status: str) -> None:
                     jobs.update(current_job_id, current_stage=stage, stage_status={**job.stage_status, stage: status})
 
-                runner.run_real_research(
+                result = runner.run_real_research(
                     project_name,
                     topic,
                     sources=sources,
@@ -282,7 +359,13 @@ def create_app(
                     data_path=upload_path,
                     provider=provider,
                     on_progress=on_progress,
+                    resume=resume,
                 )
+                reused_steps = list(getattr(result, "reused_steps", []) or [])
+                resume_plan = getattr(result, "resume_plan", "") or ""
+                resume_note = getattr(result, "resume_note", "") or ""
+                for line in _resume_log_lines(reused_steps, resume_plan, resume_note):
+                    jobs.log(current_job_id, line)
                 artifacts: list[dict[str, str]] = []
                 warnings: list[str] = []
                 for export_format in exports:
@@ -305,6 +388,9 @@ def create_app(
                     stage_status={**job.stage_status, "export": "completed"},
                     artifacts=artifacts,
                     warnings=warnings,
+                    reused_steps=reused_steps,
+                    resume_plan=resume_plan,
+                    resume_note=resume_note,
                     finished_at=datetime.now(UTC).isoformat(),
                 )
             except Exception as exc:

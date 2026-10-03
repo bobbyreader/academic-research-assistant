@@ -144,11 +144,44 @@ A review is a language-model opinion, not evidence, so it **never blocks** the
 pipeline — it is surfaced as a warning. Blocking stays reserved for the two
 deterministic gates. Results are written to `artifacts/review/review_reports.{json,md}`.
 
+### ♻️ Resuming a run
+
+Re-running a project **resumes by default**: stages whose artifacts already exist
+and whose inputs are unchanged are skipped, so the literature is **not re-searched**
+and the model is **not re-called** for them. What counts as reuse is decided from
+evidence, not a flag file:
+
+- **Artifacts are the evidence.** A stage is reusable only if its output physically
+  exists, is non-empty, and parses. A zero-byte file or an unreadable JSON is not
+  evidence; the stage runs again.
+- **Every stage's artifacts are bound to the run's input fingerprint** (topic,
+  sources, result cap, the dataset's content hash, figure resolution, reviewer
+  count). If you change the topic, swap the CSV, or change the source list, the
+  affected stage — and every stage after it — is **re-executed from scratch**. This
+  is deliberate: reusing old search results for a new question would produce a
+  manuscript whose citations and statistics all check out yet answer the wrong
+  question.
+- **Reuse is a contiguous prefix.** Once a stage cannot be reused, no downstream
+  stage can be either, so you never get a stitched-together manuscript.
+
+```bash
+# Resume (default): reuse unchanged stages, redo only what changed
+python3 orchestrator.py research my_paper --topic "..."
+
+# Force a completely fresh run: ignore every existing artifact
+python3 orchestrator.py research my_paper --topic "..." --no-resume
+```
+
+Both the CLI and the Web UI report exactly which stages were reused, so you can see
+that a resumed run did no searching and made no model calls. Full phase detail lives
+in [ROADMAP.md](ROADMAP.md).
+
 ### 🧰 CLI commands
 
 | Command | Purpose |
 |---------|---------|
-| `research <name> --topic "..."` | Run the full pipeline (auto-creates the project) |
+| `research <name> --topic "..."` | Run the full pipeline (auto-creates the project); resumes by default |
+| `research <name> --topic "..." --no-resume` | Force a fresh run, ignoring existing artifacts |
 | `init <name> [--mode …]` | Create an empty project |
 | `status <name>` | Show stage status and artifacts |
 | `list` | List projects |
@@ -188,6 +221,7 @@ academic-research-assistant/
 │   ├── llm_client.py        # Codex CLI / Gemini / OpenAI-compatible clients
 │   ├── data_analyzer.py     # Descriptive statistics for optional CSV data
 │   ├── http_client.py       # Dependency-free HTTP transport with retries
+│   ├── resume.py            # ♻️ Resume decision: which stages can be safely skipped
 │   ├── artifact_store.py    # Versioned artifact storage (v1/v2/v3…)
 │   ├── state_manager.py     # Project state + checkpoints
 │   ├── export_service.py    # Markdown -> PDF / PPTX
@@ -372,11 +406,37 @@ python3 web_app.py            # http://127.0.0.1:5050
 评审是语言模型的**意见而非证据**，因此**永不阻断**管线——只以警告形式呈现。
 阻断始终保留给两个确定性关口。结果写入 `artifacts/review/review_reports.{json,md}`。
 
+### ♻️ 断点续跑
+
+对同一项目再次运行**默认就会续跑**：已有产物、且输入未变化的阶段会被跳过——这些阶段
+**不会重新检索文献，也不会重新调用模型**。是否复用由**证据**决定，而不是某个标志文件：
+
+- **产物本身就是证据。** 只有当某阶段的产出物理存在、非空且可解析时才可复用。
+  零字节文件或无法解析的 JSON 都不算证据，该阶段会重新执行。
+- **每个阶段的产物都绑定本次运行的输入指纹**（研究主题、检索源、检索条数上限、
+  数据文件的**内容哈希**、图表分辨率、评审人数）。只要改了主题、换了 CSV、改了检索源，
+  受影响的阶段**及其之后的所有阶段都会从头执行**。这是刻意为之：用旧的检索结果回答
+  新问题，会得到一份"引用全部存在、统计数字全部对得上"却答非所问的手稿。
+- **复用集合是连续前缀。** 一旦某阶段无法复用，其下游阶段也一律不能复用，
+  因此不会出现拼接式手稿。
+
+```bash
+# 续跑（默认）：复用未变化的阶段，只重做真正改变的部分
+python3 orchestrator.py research my_paper --topic "..."
+
+# 强制全新运行：忽略所有已有产物
+python3 orchestrator.py research my_paper --topic "..." --no-resume
+```
+
+命令行与网页界面都会如实报告**具体复用了哪些阶段**，让你一眼看出这次运行没有重新检索、
+没有重新调用模型。完整阶段说明见 [ROADMAP.md](ROADMAP.md)。
+
 ### 🧰 命令行命令
 
 | 命令 | 作用 |
 |------|------|
-| `research <名称> --topic "..."` | 执行完整工作流（自动创建项目） |
+| `research <名称> --topic "..."` | 执行完整工作流（自动创建项目），默认续跑 |
+| `research <名称> --topic "..." --no-resume` | 强制全新运行，忽略已有产物 |
 | `init <名称> [--mode …]` | 创建空项目 |
 | `status <名称>` | 查看阶段状态与产出物 |
 | `list` | 列出所有项目 |
@@ -415,6 +475,7 @@ academic-research-assistant/
 │   ├── llm_client.py        # Codex CLI / Gemini / OpenAI 兼容客户端
 │   ├── data_analyzer.py     # 可选 CSV 数据的描述性统计
 │   ├── http_client.py       # 无第三方依赖、带重试的 HTTP 传输层
+│   ├── resume.py            # ♻️ 断点续跑判定：哪些阶段可安全跳过
 │   ├── artifact_store.py    # 版本化产出物存储（v1/v2/v3…）
 │   ├── state_manager.py     # 项目状态与检查点
 │   ├── export_service.py    # Markdown -> PDF / PPTX

@@ -31,9 +31,49 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
+from core.research_models import ArtifactDecodeError
+
 
 class FigureBuildError(ValueError):
     """当无法安全地构建图件（例如输入文件不可读）时抛出。"""
+
+
+# --------------------------------------------------------------------------- #
+# 反序列化校验：结构非法一律抛 ValueError（绝不静默构造半个对象）
+# --------------------------------------------------------------------------- #
+def _require_object(value: object, owner: str) -> dict:
+    """要求是映射（dict）；否则抛 ``ValueError``。"""
+    if not isinstance(value, dict):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 期望 payload 为 dict，实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_str(data: dict, field: str, owner: str) -> str:
+    value = data.get(field)
+    if not isinstance(value, str):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 str，"
+            f"实际为 {type(value).__name__}"
+        )
+    return value
+
+
+def _require_str_list(data: dict, field: str, owner: str) -> list[str]:
+    value = data.get(field)
+    if not isinstance(value, list):
+        raise ArtifactDecodeError(
+            f"{owner}.from_dict 字段 '{field}' 期望 list[str]，"
+            f"实际为 {type(value).__name__}"
+        )
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ArtifactDecodeError(
+                f"{owner}.from_dict 字段 '{field}' 的第 {index} 个元素期望 str，"
+                f"实际为 {type(item).__name__}"
+            )
+    return list(value)
 
 
 # Okabe-Ito 色盲友好配色（8 色，十六进制）。
@@ -61,17 +101,34 @@ _NUMERIC_RATIO_THRESHOLD = 0.5
 
 @dataclass
 class FigureSpec:
-    """描述一张已生成图件的元数据。"""
+    """描述一张已生成图件的元数据。
+
+    **``path`` 字段有两种口径，消费者不得对二者做任何假设：**
+
+    1. ``build_figures()`` 返回时，``path`` 指向调用方传入的 ``output_dir`` 下的
+       **绝对**路径；其生命周期与该 ``output_dir`` 绑定（管线用的是临时目录，
+       会在阶段结束后被删除）。
+    2. 管线持久化 ``figures.json`` 时，改为**项目相对**路径，使其可移植、
+       可复现（绝对路径无法跨根目录逐字节一致）。
+
+    因此：**消费者既不得假设 ``path`` 是绝对路径，也不得假设该路径一定存在。**
+    需要图件内容时，应通过产物存储按 ``filename`` 解析，而不是直接读取 ``path``。
+    """
 
     figure_id: str  # 例如 "Figure 1"
     filename: str  # 例如 "figure_1_distribution.png"
     title: str
     caption: str
     figure_type: str  # "distribution" | "group_comparison" | "correlation"
+    #: 图件路径。两种口径见类 docstring；**不得假设为绝对路径或一定存在**。
     path: Path
 
     def to_dict(self) -> dict:
-        """返回可直接序列化为 JSON 的字典（path 转为字符串）。"""
+        """返回可直接序列化为 JSON 的字典（path 转为字符串）。
+
+        写出的 ``path`` 可能是绝对路径（``build_figures()`` 的原始产物）或项目
+        相对路径（管线持久化后）；消费者不得假设是哪一种，也不得假设其存在。
+        """
         return {
             "figure_id": self.figure_id,
             "filename": self.filename,
@@ -80,6 +137,24 @@ class FigureSpec:
             "figure_type": self.figure_type,
             "path": str(self.path),
         }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> FigureSpec:
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。
+
+        ``path`` 由字符串还原为 :class:`~pathlib.Path`。**不校验、也不假设该路径
+        存在**：它可能是已被删除的临时目录绝对路径，也可能是项目相对路径
+        （见类 docstring）；需要文件内容时应按 ``filename`` 通过产物存储解析。
+        """
+        data = _require_object(payload, cls.__name__)
+        return cls(
+            figure_id=_require_str(data, "figure_id", cls.__name__),
+            filename=_require_str(data, "filename", cls.__name__),
+            title=_require_str(data, "title", cls.__name__),
+            caption=_require_str(data, "caption", cls.__name__),
+            figure_type=_require_str(data, "figure_type", cls.__name__),
+            path=Path(_require_str(data, "path", cls.__name__)),
+        )
 
 
 @dataclass
@@ -95,6 +170,29 @@ class FigureBundle:
             "figures": [figure.to_dict() for figure in self.figures],
             "warnings": list(self.warnings),
         }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> FigureBundle:
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。"""
+        data = _require_object(payload, cls.__name__)
+        figures = data.get("figures")
+        if not isinstance(figures, list):
+            raise ArtifactDecodeError(
+                f"{cls.__name__}.from_dict 字段 'figures' 期望 list，"
+                f"实际为 {type(figures).__name__}"
+            )
+        decoded: list[FigureSpec] = []
+        for index, item in enumerate(figures):
+            if not isinstance(item, dict):
+                raise ArtifactDecodeError(
+                    f"{cls.__name__}.from_dict 字段 'figures' 的第 {index} 个元素"
+                    f"期望 dict，实际为 {type(item).__name__}"
+                )
+            decoded.append(FigureSpec.from_dict(item))
+        return cls(
+            figures=decoded,
+            warnings=_require_str_list(data, "warnings", cls.__name__),
+        )
 
 
 def _resolve_palette(palette: str) -> tuple[str, ...]:
