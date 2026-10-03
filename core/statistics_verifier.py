@@ -18,8 +18,8 @@ in an artifact instead of passing silently.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Sequence
 
 #: Matches ``p < 0.05``, ``p = 0.031``, ``p-value=0.03``, ``P <= .01`` …
 P_VALUE_PATTERN = re.compile(

@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -35,8 +35,8 @@ class ProjectState:
     mode: str
     current_stage: WorkflowStage
     stage_status: dict[WorkflowStage, str] = field(default_factory=dict)
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -65,7 +65,7 @@ class StateManager:
         Args:
             state: 项目状态对象。
         """
-        state.updated_at = datetime.now().isoformat()
+        state.updated_at = datetime.now(UTC).isoformat()
         state_file = self.projects_dir / state.name / "state.json"
         state_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -110,7 +110,7 @@ class StateManager:
         checkpoint_dir = self.projects_dir / project_name / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         checkpoint_file = checkpoint_dir / f"checkpoint_{timestamp}.json"
 
         data = asdict(state)

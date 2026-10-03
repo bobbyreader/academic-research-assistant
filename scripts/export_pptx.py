@@ -11,16 +11,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, ClassVar
 
 from pptx import Presentation
-from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.text import PP_ALIGN
+from pptx.util import Inches, Pt
 
 # Configure logging
 logging.basicConfig(
@@ -36,10 +35,10 @@ class SlideContent:
     """Container for a single slide's content."""
 
     title: str
-    content: List[str] = field(default_factory=list)
-    notes: Optional[str] = None
-    image_path: Optional[Path] = None
-    image_caption: Optional[str] = None
+    content: list[str] = field(default_factory=list)
+    notes: str | None = None
+    image_path: Path | None = None
+    image_caption: str | None = None
     layout: str = "title_and_content"  # title, title_and_content, section_header, two_content, blank
     chart_placeholder: bool = False
 
@@ -48,7 +47,7 @@ class OutlineParser:
     """Parse JSON or Markdown outlines into slide structures."""
 
     @staticmethod
-    def parse_json(filepath: Path) -> List[SlideContent]:
+    def parse_json(filepath: Path) -> list[SlideContent]:
         """Parse JSON outline file.
 
         Expected JSON format:
@@ -92,7 +91,7 @@ class OutlineParser:
         return slides
 
     @staticmethod
-    def parse_markdown(filepath: Path) -> List[SlideContent]:
+    def parse_markdown(filepath: Path) -> list[SlideContent]:
         """Parse Markdown outline file.
 
         Expected Markdown format:
@@ -117,7 +116,7 @@ class OutlineParser:
             return []
 
         slides = []
-        current_slide: Optional[Dict[str, Any]] = None
+        current_slide: dict[str, Any] | None = None
 
         lines = content.split("\n")
         i = 0
@@ -153,7 +152,7 @@ class OutlineParser:
                 continue
 
             # Bullet points
-            if line.startswith("- ") or line.startswith("* "):
+            if line.startswith(("- ", "* ")):
                 current_slide["content"].append(line[2:].strip())
                 i += 1
                 continue
@@ -207,7 +206,7 @@ class PPTXGenerator:
     """Generate PowerPoint presentations."""
 
     # Layout mapping to python-pptx slide layouts
-    LAYOUT_MAP = {
+    LAYOUT_MAP: ClassVar[dict[str, int]] = {
         "title": 0,           # Title Slide
         "title_and_content": 1,  # Title and Content
         "section_header": 2,     # Section Header
@@ -219,7 +218,7 @@ class PPTXGenerator:
         "picture_with_caption": 8,
     }
 
-    def __init__(self, template_path: Optional[Path] = None):
+    def __init__(self, template_path: Path | None = None):
         """Initialize generator.
 
         Args:
@@ -370,7 +369,7 @@ class PPTXGenerator:
             for paragraph in notes_tf.paragraphs:
                 paragraph.font.size = self.notes_font_size
 
-    def generate(self, slides: List[SlideContent], output_path: Path) -> bool:
+    def generate(self, slides: list[SlideContent], output_path: Path) -> bool:
         """Generate complete PPTX from slide list.
 
         Args:

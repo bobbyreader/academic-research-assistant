@@ -194,7 +194,20 @@ Full phase detail and the audit log live in [ROADMAP.md](ROADMAP.md).
 | 1 | Citation integrity gate (marker traceability + DOI verification) | ✅ done |
 | 2 | Inferential statistics, publication figures, statistics traceability gate | ✅ done |
 | 3 | Simulated peer review; presentation outline built from the real artifacts | ✅ done |
-| 4 | CI (pytest/ruff/mypy), packaging, config validation, observability | 🔄 in progress |
+| 4 | CI (pytest/ruff/mypy), packaging, config validation | ✅ done |
+
+### 🧪 Development
+
+```bash
+python3 -m pip install -e ".[dev]"
+ruff check .   # static checks (ruff version pinned via [tool.ruff].required-version)
+mypy           # type checks
+pytest         # test suite
+```
+
+CI runs all three on Python 3.11 and 3.12 (see `.github/workflows/ci.yml`).
+`config/settings.yaml` is validated before a run starts and fails fast, naming the
+offending key instead of crashing halfway through.
 
 ### 🤝 Contributing
 
@@ -389,7 +402,20 @@ academic-research-assistant/
 | 1 | 引用可信性关口（引用可追溯 + DOI 校验） | ✅ 已完成 |
 | 2 | 推断统计、出版级图表、统计可追溯性关口 | ✅ 已完成 |
 | 3 | 模拟同行评审；基于真实产物生成演示大纲 | ✅ 已完成 |
-| 4 | CI（pytest/ruff/mypy）、打包、配置校验、可观测性 | 🔄 进行中 |
+| 4 | CI（pytest/ruff/mypy）、打包、配置校验 | ✅ 已完成 |
+
+### 🧪 开发
+
+```bash
+python3 -m pip install -e ".[dev]"
+ruff check .   # 静态检查（版本由 [tool.ruff].required-version 锁定）
+mypy           # 类型检查
+pytest         # 测试
+```
+
+CI 在 Python 3.11 / 3.12 上执行以上三项（见 `.github/workflows/ci.yml`）。
+`config/settings.yaml` 在运行开始前校验，出错即**快速失败并点名出错的键**，
+而不是跑到一半才崩溃。
 
 ### 🤝 贡献指南
 

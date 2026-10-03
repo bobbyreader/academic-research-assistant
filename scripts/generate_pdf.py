@@ -90,7 +90,7 @@ def generate_pdf(
     print(f"[INFO] 执行: {' '.join(cmd)}")
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
         print(f"[OK] PDF 生成成功: {output_file}")
         return True
     except subprocess.CalledProcessError as e:

@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "academic-research-assistant"
+version = "0.2.0"
+description = "AI-assisted literature research pipeline with citation and statistics integrity gates"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "scipy>=1.11.0",
+    "matplotlib>=3.8.0",
+    "pyyaml>=6.0.1",
+    "Flask>=3.0.0,<4.0.0",
+    "markdown>=3.5.0",
+    "python-pptx>=0.6.23",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    # Pinned to match [tool.ruff].required-version so lint results are
+    # reproducible instead of drifting with a new default rule set.
+    "ruff==0.16.0",
+    "mypy>=1.14.0",
+]
+
+[project.scripts]
+ara = "orchestrator:main"
+
+# The application is designed to run from a source checkout: runtime assets
+# (scripts/, web/, templates/, config/) are resolved relative to the repo root.
+[tool.setuptools]
+packages = ["core"]
+py-modules = ["orchestrator", "web_app"]
+
+# --------------------------------------------------------------------------- #
+# pytest
+# --------------------------------------------------------------------------- #
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Make `import core` / `import orchestrator` work regardless of how pytest is
+# invoked (CI uses `pytest`, which does not add the CWD to sys.path).
+pythonpath = ["."]
+
+# --------------------------------------------------------------------------- #
+# ruff
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["."]
+# Ruff's default rule set is a curated list of high-signal rules rather than
+# whole families, so it is left unset on purpose: selecting whole families here
+# pulled in line-length (E501), pylint complexity (PLR0915/PLR2004) and
+# ambiguous-unicode (RUF001) rules that are noise for a codebase with heavy
+# Chinese prose. Pinning the version keeps CI reproducible instead.
+required-version = "==0.16.0"
+
+[tool.ruff.lint.per-file-ignores]
+# The exporter CLI scripts deliberately catch broad exceptions: an unexpected
+# failure must degrade into a readable error message instead of a traceback
+# escaping into a pipeline run.
+"scripts/*.py" = ["BLE001"]
+
+# --------------------------------------------------------------------------- #
+# mypy
+# --------------------------------------------------------------------------- #
+[tool.mypy]
+python_version = "3.11"
+files = ["core", "orchestrator.py", "web_app.py"]
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+# Third-party libraries without bundled type information.
+module = [
+    "pandas.*",
+    "scipy.*",
+    "matplotlib.*",
+    "pptx.*",
+    "yaml.*",
+    "flask.*",
+    "werkzeug.*",
+    "markdown.*",
+    "weasyprint.*",
+]
+ignore_missing_imports = true

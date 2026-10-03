@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +47,7 @@ class WebJob:
     artifacts: list[dict[str, str]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     finished_at: str | None = None
 
 
@@ -107,7 +107,7 @@ def _validate_project_name(value: str) -> str:
 def _make_project_name(topic: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", topic.lower()).strip("-")[:24]
     slug = slug or "research"
-    return f"{slug}-{datetime.now(timezone.utc).strftime('%m%d%H%M')}-{uuid.uuid4().hex[:4]}"
+    return f"{slug}-{datetime.now(UTC).strftime('%m%d%H%M')}-{uuid.uuid4().hex[:4]}"
 
 
 def _list_value(value: Any, default: list[str]) -> list[str]:
@@ -224,9 +224,9 @@ def create_app(
     def start_research() -> Any:
         try:
             if request.is_json:
-                payload = request.get_json(silent=True) or {}
+                payload: dict[str, Any] = request.get_json(silent=True) or {}
             else:
-                payload = request.form.to_dict()
+                payload = dict(request.form.to_dict())
                 payload["sources"] = request.form.getlist("sources")
                 payload["exports"] = request.form.getlist("exports")
             topic = str(payload.get("topic", "")).strip()
@@ -305,7 +305,7 @@ def create_app(
                     stage_status={**job.stage_status, "export": "completed"},
                     artifacts=artifacts,
                     warnings=warnings,
-                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    finished_at=datetime.now(UTC).isoformat(),
                 )
             except Exception as exc:
                 app.logger.exception("Research job %s failed", current_job_id)
@@ -313,7 +313,7 @@ def create_app(
                     current_job_id,
                     status="failed",
                     error=str(exc),
-                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    finished_at=datetime.now(UTC).isoformat(),
                 )
 
         jobs.create(job, worker)

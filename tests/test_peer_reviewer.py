@@ -68,11 +68,11 @@ class FakeLLM:
 
 
 def _review(llm: FakeLLM, **kwargs) -> PeerReviewBundle:
-    defaults = dict(
-        topic="Sleep and memory",
-        manuscript_body=MANUSCRIPT,
-        reviewer_count=3,
-    )
+    defaults = {
+        "topic": "Sleep and memory",
+        "manuscript_body": MANUSCRIPT,
+        "reviewer_count": 3,
+    }
     defaults.update(kwargs)
     return review_manuscript(llm, **defaults)
 

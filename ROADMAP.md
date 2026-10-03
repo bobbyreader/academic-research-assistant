@@ -44,7 +44,7 @@
 | **Phase 1** | 引用可信性关口（标识完整性硬阻断 + DOI 校验顾问级） | ✅ 完成 |
 | **Phase 2** | 推断统计引擎、出版级图表、统计可追溯性关口、管线集成 | ✅ 完成 |
 | **Phase 3** | 顾问级模拟同行评审、基于真实产物的演示大纲 | ✅ 完成 |
-| **Phase 4** | CI（pytest/ruff/mypy）、打包（pyproject）、配置校验、可观测性 | 🔄 进行中 |
+| **Phase 4** | CI（pytest/ruff/mypy）、打包（pyproject）、配置校验 | ✅ 完成 |
 
 ---
 
@@ -85,6 +85,16 @@
 | docstring 声称"意见必须引用原文"，但注入意见用关口指针 | 文档与行为矛盾 |
 | `_has_tests` 对 int 输入返回错误 | 潜在集成 bug |
 
+### Phase 4
+| 缺陷 | 性质 |
+|---|---|
+| 我显式按"规则族"配置 ruff，把违规从 53 项放大到 **740 项** | 配置失误：ruff 默认是**精选规则**而非整族，按族选择会引入 E501/PLR0915/PLR2004/RUF001 等噪声 |
+| `pyproject.toml` 的 `addopts="-q"` 与命令行 `-q` 叠加为 `-qq`，**吞掉测试汇总行** | 自伤配置：验证被静默削弱 |
+| `llm_client` 把 `str \| None` 传给要求 `str` 的参数（8 处） | 真实类型缺陷 |
+| `web_app` 把 `list[str]` 赋给 `str` 类型的字典值 | 真实类型谎言 |
+| `orchestrator` 的 `**options: object` 无法与目标签名匹配 | 类型不精确 |
+| 声明 Python 3.11 后暴露 `UP017`（应使用 `datetime.UTC`） | 声明真实最低版本后正确浮现的现代化项 |
+
 ### 一次误报的澄清
 两位成员先后报告"测试顺序相关抖动"。判定性检查结果：**未安装随机化插件**（顺序固定）、
 可疑测试**连跑 10 次全过**、**文件顺序反转通过**、**5 次全量运行全过**。
@@ -108,12 +118,18 @@
 
 ---
 
-## 六、Phase 4 范围
+## 六、质量门禁
 
-| 项 | 内容 |
-|---|---|
-| 打包 | `pyproject.toml`：元数据、依赖、pytest/ruff/mypy 配置 |
-| CI | `.github/workflows/ci.yml`：pytest + ruff + mypy |
-| 静态检查 | 让 `ruff` / `mypy` 通过（含修复既有违规） |
-| 配置校验 | `config/settings.yaml` 结构校验，避免静默错配 |
-| 可观测性 | 结构化日志；失败原因可追溯 |
+三道门禁，全部在 CI（`.github/workflows/ci.yml`）中强制执行：
+
+| 门禁 | 命令 | 现状 |
+|---|---|---|
+| 静态检查 | `ruff check .` | 全部通过（ruff 版本锁定 `==0.16.0`，保证可复现） |
+| 类型检查 | `mypy` | 20 个源文件 0 问题 |
+| 测试 | `pytest` | 116 通过 / 1 跳过（跳过 = 环境缺 PDF 后端时正确降级） |
+
+配置校验：`core/config_validation.py` 把 `config/settings.yaml` 视为不可信输入，
+在 `ResearchService` 产生**任何副作用之前**快速失败，并点名出错的键。
+
+**已知限制**：`pyproject.toml` 只做元数据 + 工具配置 + 依赖声明；应用按源码目录运行
+（`scripts/`、`web/`、`templates/`、`config/` 相对仓库根解析），wheel 分发尚未打包这些运行时资产。

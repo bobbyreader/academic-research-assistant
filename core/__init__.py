@@ -4,8 +4,8 @@ from .artifact_store import ArtifactStore
 from .state_manager import ProjectState, StateManager, WorkflowStage
 
 __all__ = [
+    "ArtifactStore",
     "ProjectState",
     "StateManager",
     "WorkflowStage",
-    "ArtifactStore",
 ]

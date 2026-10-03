@@ -228,8 +228,13 @@ class CodexCLIClient:
         return parse_json_response(self.complete(system_prompt, user_prompt))
 
     def _command(self, output_path: Path) -> list[str]:
+        executable = self.executable
+        if executable is None:
+            raise LLMClientError(
+                "未找到 Codex CLI。请先安装并登录 Codex，然后重新启动研究助手。"
+            )
         command = [
-            self.executable,
+            executable,
             "exec",
             "--ephemeral",
             "--ignore-rules",
@@ -281,21 +286,21 @@ def build_llm_client(
     workspace_dir: Path | None = None,
 ) -> LLMClient:
     """Build a client from explicit values, then environment variables."""
-    selected = (provider or os.getenv("ARS_LLM_PROVIDER", "gemini")).lower()
+    selected = (provider or os.getenv("ARS_LLM_PROVIDER") or "gemini").lower()
     if selected in {"openai", "openai_compatible", "compatible"}:
         settings = LLMSettings(
             provider="openai_compatible",
-            api_key=api_key or os.getenv("ARS_LLM_API_KEY") or os.getenv("OPENAI_API_KEY", ""),
-            model=model or os.getenv("ARS_LLM_MODEL", "gpt-4o-mini"),
-            base_url=base_url or os.getenv("ARS_LLM_BASE_URL", "https://api.openai.com/v1"),
+            api_key=api_key or os.getenv("ARS_LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or "",
+            model=model or os.getenv("ARS_LLM_MODEL") or "gpt-4o-mini",
+            base_url=base_url or os.getenv("ARS_LLM_BASE_URL") or "https://api.openai.com/v1",
         )
         return OpenAICompatibleClient(settings)
 
     if selected == "gemini":
         settings = LLMSettings(
             provider="gemini",
-            api_key=api_key or os.getenv("GEMINI_API_KEY", ""),
-            model=model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            api_key=api_key or os.getenv("GEMINI_API_KEY") or "",
+            model=model or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash",
             base_url=(
                 base_url
                 or os.getenv("GEMINI_BASE_URL")
@@ -309,7 +314,7 @@ def build_llm_client(
         settings = LLMSettings(
             provider="codex_cli",
             api_key="",
-            model=model or os.getenv("CODEX_MODEL", ""),
+            model=model or os.getenv("CODEX_MODEL") or "",
         )
         return CodexCLIClient(
             settings,

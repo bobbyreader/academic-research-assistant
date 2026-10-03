@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from core.artifact_store import ArtifactStore
-from core.config_loader import load_settings
+from core.config_validation import ConfigValidationError, load_validated_settings
 from core.external_clients import LiteratureSearcher
 from core.llm_client import build_llm_client
 from core.research_pipeline import (
@@ -45,6 +45,16 @@ class ResearchService:
         base_url: str | None = None,
         on_progress: Callable[[str, str], None] | None = None,
     ) -> PipelineResult:
+        # Validate configuration before touching any state or network resource:
+        # a broken settings file must fail in under a second with the offending
+        # key named, not halfway through an expensive pipeline run.
+        runtime_settings, validation = load_validated_settings(self.projects_dir.parent)
+        if not validation.valid:
+            details = "；".join(validation.errors)
+            raise ConfigValidationError(
+                f"config/settings.yaml 配置无效，请修正后再运行：{details}"
+            )
+
         state = self.state_manager.load(project_name)
         if state is None:
             raise FileNotFoundError(f"项目 '{project_name}' 不存在")
@@ -61,7 +71,6 @@ class ResearchService:
             }
         )
         self.state_manager.save(state)
-        runtime_settings = load_settings(self.projects_dir.parent)
         llm_settings = runtime_settings.get("llm", {})
         api_settings = runtime_settings.get("api_keys", {})
         if not isinstance(api_settings, dict):

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from core.http_client import HttpClientError, UrllibTransport
@@ -51,7 +51,7 @@ def _year(value: Any) -> int | None:
         value = value[0][0] if value[0] else None
     try:
         parsed = int(value)
-        return parsed if 1000 <= parsed <= datetime.now(timezone.utc).year + 2 else None
+        return parsed if 1000 <= parsed <= datetime.now(UTC).year + 2 else None
     except (TypeError, ValueError):
         return None
 

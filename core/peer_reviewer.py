@@ -32,8 +32,10 @@ The review is honest about its own limits:
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 #: Reviewer roles, in priority order. ``reviewer_count`` truncates this tuple.
 REVIEWER_ROLES: tuple[str, ...] = ("methodology", "statistics", "novelty")
@@ -240,9 +242,9 @@ def _coerce_score(value: object) -> int:
         number = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0
-    if number != number:  # NaN
+    if math.isnan(number):
         return 0
-    return max(0, min(100, int(round(number))))
+    return max(0, min(100, round(number)))
 
 
 def _coerce_recommendation(value: object) -> str:
@@ -359,7 +361,7 @@ def _coerce_score_like(value: object) -> int:
         number = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0
-    if number != number:  # NaN
+    if math.isnan(number):
         return 0
     return max(0, int(number))
 
@@ -560,14 +562,22 @@ def _build_synthesis(reports: Sequence[ReviewerReport], decision: str) -> str:
 def _author_checks(decision: str) -> list[str]:
     """生成面向作者的中文注意事项（模拟性质与机械规则必须明示）。"""
     return [
-        "本报告由大语言模型**模拟**生成，并非真实同行评审，不可作为投稿依据，"
-        "请务必由人类作者复核。",
-        f"综合决定 `{decision}` 由**机械规则**（最坏情况优先、平局取多数）推导，"
-        "不包含编辑判断。",
-        "所有 concern 的证据均指向稿件原文；请据此逐条核对，"
-        "并优先处理 major 级别问题。",
-        "追溯类 concern 直接来自引用/统计校验门：未知引用标识与无法追溯的统计陈述"
-        "必须修正，不得忽略。",
+        (
+            "本报告由大语言模型**模拟**生成，并非真实同行评审，不可作为投稿依据，"
+            "请务必由人类作者复核。"
+        ),
+        (
+            f"综合决定 `{decision}` 由**机械规则**（最坏情况优先、平局取多数）推导，"
+            "不包含编辑判断。"
+        ),
+        (
+            "所有 concern 的证据均指向稿件原文；请据此逐条核对，"
+            "并优先处理 major 级别问题。"
+        ),
+        (
+            "追溯类 concern 直接来自引用/统计校验门：未知引用标识与无法追溯的统计陈述"
+            "必须修正，不得忽略。"
+        ),
     ]
 
 

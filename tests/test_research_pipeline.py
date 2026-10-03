@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from core.artifact_store import ArtifactStore
+from core.config_validation import ConfigValidationError
 from core.external_clients import PaperRecord, SearchReport
 from core.research_pipeline import (
     ResearchPipeline,
@@ -381,3 +382,31 @@ def test_peer_review_can_be_disabled(tmp_path: Path) -> None:
     assert result.review is None
     assert not any("模拟同行评审未执行" in warning for warning in result.warnings)
     assert not (tmp_path / "projects/noreview0/artifacts/review").exists()
+
+
+def test_invalid_settings_fail_fast_before_any_work(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.yaml").write_text(
+        "review:\n  reviewer_count: three\n", encoding="utf-8"
+    )
+
+    projects_dir = tmp_path / "projects"
+    state_manager = StateManager(projects_dir)
+    state_manager.save(
+        ProjectState(
+            name="badcfg",
+            mode="hybrid",
+            current_stage=WorkflowStage.BRAINSTORMING,
+        )
+    )
+
+    with pytest.raises(ConfigValidationError, match="reviewer_count"):
+        ResearchService(projects_dir, state_manager, ArtifactStore(projects_dir)).run(
+            "badcfg", "a topic", sources=["crossref"], max_results=1
+        )
+
+    # Failing fast means no stage was mutated and no network work was attempted.
+    state = state_manager.load("badcfg")
+    assert state is not None
+    assert state.stage_status[WorkflowStage.SEARCH] == "pending"

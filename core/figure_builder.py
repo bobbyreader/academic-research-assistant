@@ -20,17 +20,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# 必须在导入 pyplot 之前指定无界面后端，否则会尝试连接显示设备。
+import matplotlib
 import numpy as np
 import pandas as pd
 
-# 必须在导入 pyplot 之前指定无界面后端，否则会尝试连接显示设备。
-import matplotlib
-
 matplotlib.use("Agg")
 
-import matplotlib.pyplot as plt  # noqa: E402  (必须在 use("Agg") 之后导入)
-from matplotlib.axes import Axes  # noqa: E402
-from matplotlib.figure import Figure  # noqa: E402
+import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 
 
 class FigureBuildError(ValueError):
@@ -188,7 +187,7 @@ def _load_frame(path: Path) -> pd.DataFrame:
         raise FigureBuildError("当前仅支持 CSV 数据文件")
     try:
         frame = pd.read_csv(path, encoding="utf-8-sig")
-    except Exception as exc:  # noqa: BLE001 - 统一转换为领域异常
+    except Exception as exc:
         raise FigureBuildError(f"无法读取 CSV 文件: {exc}") from exc
     if frame.shape[1] == 0:
         raise FigureBuildError("CSV 缺少列")
@@ -477,7 +476,7 @@ def _build_correlation(
 
     first, second = best_pair
     paired = frame[[first, second]].apply(pd.to_numeric, errors="coerce").dropna()
-    n = int(len(paired))
+    n = len(paired)
     if n < 2 or paired[first].std(ddof=1) == 0.0 or paired[second].std(ddof=1) == 0.0:
         return "相关列方差为零或样本不足，跳过相关图"
 
@@ -640,7 +639,7 @@ def build_figures(
         fig, title, pair, r = correlation
         first, second = pair
         paired = frame[[first, second]].apply(pd.to_numeric, errors="coerce").dropna()
-        n = int(len(paired))
+        n = len(paired)
         caption = (
             f"图为「{first}」与「{second}」的相关性，有效样本量 n={n}；"
             f"散点为个体观测，直线为最小二乘拟合，相关系数 r={r:.3f}。"

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -72,7 +72,7 @@ class ArtifactStore:
         meta_file = stage_dir / f"{filename}.v{version}.meta"
         meta_content = {
             "version": version,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "original_filename": filename,
             **(metadata or {}),
         }

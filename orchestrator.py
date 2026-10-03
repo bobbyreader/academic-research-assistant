@@ -9,7 +9,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
 from core.artifact_store import ArtifactStore
 from core.export_service import export_pdf, export_pptx
@@ -80,7 +80,7 @@ class Orchestrator:
         return project_dir
 
     def run_real_research(
-        self, project_name: str, topic: str, **options: object
+        self, project_name: str, topic: str, **options: Any
     ) -> PipelineResult:
         """Run real search, LLM analysis, drafting, and artifact persistence."""
         return self.research_service.run(project_name, topic, **options)
@@ -373,7 +373,13 @@ def main() -> None:
                 model=args.model,
                 base_url=args.base_url,
             )
-            formats = ["md", "pdf", "pptx"] if args.export == "all" else [args.export]
+            # argparse cannot narrow a free-form string to a Literal, and
+            # --export accepts arbitrary values; Orchestrator.export validates.
+            formats: list[ExportFormat] = (
+                ["md", "pdf", "pptx"]
+                if args.export == "all"
+                else [cast(ExportFormat, args.export)]
+            )
             for export_format in formats:
                 orchestrator.export(args.project_name, export_format)
             print("[DONE] 真实研究工作流执行完成")
@@ -384,7 +390,7 @@ def main() -> None:
         elif args.command == "export":
             orchestrator.export(
                 args.project_name,
-                args.format,
+                cast(ExportFormat, args.format),
                 args.output,
             )
     except (FileNotFoundError, FileExistsError, ValueError, RuntimeError) as e:
