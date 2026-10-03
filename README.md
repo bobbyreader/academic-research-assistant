@@ -100,6 +100,29 @@ model is never allowed to invent a number:
 Statistics and figures always use the **same resolved grouping**, so a figure can
 never illustrate a different grouping than the test it accompanies.
 
+### 🔎 Claim–evidence traceability
+
+`core/claim_verifier.py` closes the last hole in the promise. The citation gate
+proves that `[P1]` **exists**; this gate checks whether the paper it points at
+actually **supports** the claim it is attached to.
+
+- one batched model call for all structured claims (`analysis.key_findings`);
+- **evidence-bound**: every verdict must quote the cited abstract verbatim, and a
+  verdict whose quote is empty is **forced to `unclear`** — the model can never
+  assert "supported" without pointing at the sentence that supports it;
+- deterministic routing: a claim citing a non-existent `[Pn]`, or a paper with no
+  abstract, is marked `unclear` **without asking the model at all**;
+- coverage is guaranteed — every (claim, cited paper) pair ends up with exactly
+  one verdict, and a verdict naming an uncited paper is dropped (no invented
+  citations);
+- **advisory, never blocking**: this is a model judgment, not deterministic
+  evidence, so it writes `artifacts/writing/claim_evidence_verification.{json,md}`
+  plus warnings. It also feeds the peer review, which injects unsupported claims
+  as reviewer concerns.
+
+**Limitation**: verification is against **abstracts only**, not full text, so
+`unclear` is common and is not an accusation.
+
 ### 🧪 Simulated peer review
 
 `core/peer_reviewer.py` produces an **advisory** pre-submission review from the
@@ -314,6 +337,24 @@ python3 web_app.py            # http://127.0.0.1:5050
 | **系统注入章节** | 统计表与图表清单由**系统**（而非模型）附加到手稿，因此交付物中的数字天然可追溯。 |
 
 统计与图表始终使用**同一个已解析的分组列**，图表不可能与被说明的检验使用不同分组。
+
+### 🔎 论断—证据可追溯性
+
+`core/claim_verifier.py` 补上了承诺的最后一块。引用关口证明 `[P1]` **存在**；
+本关口检查它指向的文献是否**真的支持**所附的论断。
+
+- 对所有结构化论断（`analysis.key_findings`）只发起**一次**批量模型调用；
+- **证据约束**：每条判定必须**逐字引用**所引文献摘要；引用为空的判定被**强制降级为
+  `unclear`**——模型不可能在不指出支撑句的情况下断言"被支持"；
+- **确定性路由**：引用了不存在的 `[Pn]`、或所引文献无摘要的论断，直接判为 `unclear`，
+  **完全不询问模型**；
+- **覆盖保证**：每个（论断，所引文献）组合恰好得到一条判定；指向未被引用文献的判定会被
+  丢弃（杜绝编造引用）；
+- **顾问级，永不阻断**：这是模型判断而非确定性证据，因此只产出
+  `artifacts/writing/claim_evidence_verification.{json,md}` 与警告。它同时喂给模拟评审，
+  把"未被支持的论断"注入为审稿意见。
+
+**已知限制**：核验基于**摘要**而非全文，因此 `unclear` 很常见，且不代表指控。
 
 ### 🧪 模拟同行评审
 

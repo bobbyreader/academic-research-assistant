@@ -257,3 +257,31 @@ def test_synthesis_counts_distinct_concerns_not_per_reviewer_copies() -> None:
 )
 def test_has_tests_handles_int_list_and_string(tests_value, expected) -> None:
     assert _has_tests({"tests": tests_value}) is expected
+
+
+def test_claim_verification_injects_traceability_concerns() -> None:
+    llm = FakeLLM([_payload()] * 3)
+
+    bundle = _review(
+        llm,
+        claim_verification={"unsupported_count": 2, "claims_without_evidence_count": 1},
+    )
+
+    concerns = [concern for report in bundle.reports for concern in report.concerns]
+    pairs = {(concern.severity, concern.category) for concern in concerns}
+    assert ("major", "claim_traceability") in pairs
+    assert ("minor", "claim_traceability") in pairs
+    assert any("unsupported_count = 2" in concern.evidence for concern in concerns)
+    assert any("claims_without_evidence_count = 1" in concern.evidence for concern in concerns)
+
+    # The reviewer prompt must carry the claim verdicts so the model can cross-check.
+    assert "论断—证据核验结果" in llm.calls[0][1]
+
+
+def test_absent_claim_verification_injects_nothing() -> None:
+    llm = FakeLLM([_payload()] * 3)
+
+    bundle = _review(llm)
+
+    concerns = [concern for report in bundle.reports for concern in report.concerns]
+    assert not any(concern.evidence.startswith("论断核验") for concern in concerns)

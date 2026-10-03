@@ -15,6 +15,7 @@ from core.citation_verifier import (
     render_verification_markdown,
     verify_citations,
 )
+from core.claim_verifier import ClaimVerificationReport, verify_claims
 from core.data_analyzer import analyze_csv
 from core.external_clients import LiteratureSearcher
 from core.figure_builder import FigureBuildError, FigureBundle, build_figures
@@ -152,6 +153,11 @@ class ResearchPipeline:
             analysis_markdown,
         )
         artifacts.extend([analysis_path, analysis_md_path])
+
+        claim_report, claim_artifacts, claim_warnings = self._run_claim_verification(
+            config.project_name, analysis, report.papers
+        )
+        artifacts.extend(claim_artifacts)
         self.progress("lit_review", "completed")
 
         body = self.llm_client.complete(
@@ -207,7 +213,7 @@ class ResearchPipeline:
 
         manuscript = self._assemble_manuscript(body, report.papers, dataset)
         review, review_artifacts, review_warnings = self._run_peer_review(
-            config, manuscript, verification, stats_verification, dataset
+            config, manuscript, verification, stats_verification, dataset, claim_report
         )
         artifacts.extend(review_artifacts)
 
@@ -231,6 +237,7 @@ class ResearchPipeline:
         warnings = list(report.errors)
         warnings.extend(dataset.warnings)
         warnings.extend(verification.warnings())
+        warnings.extend(claim_warnings)
         if stats_verification is not None:
             warnings.extend(stats_verification.warnings())
         warnings.extend(review_warnings)
@@ -356,6 +363,51 @@ class ResearchPipeline:
             lines.append("")
         return "\n".join(lines).rstrip()
 
+    def _run_claim_verification(
+        self,
+        project_name: str,
+        analysis: dict[str, Any],
+        papers: list[PaperRecord],
+    ) -> tuple[ClaimVerificationReport | None, list[Path], list[str]]:
+        """Check that each structured claim is supported by the abstracts it cites.
+
+        Advisory by design: the verdict is a language-model judgment, not
+        deterministic evidence, so it produces an artifact and warnings rather
+        than blocking the run. A failure inside this gate is itself downgraded to
+        a warning — an advisory gate must never be able to break a run.
+        """
+        claims = analysis.get("key_findings")
+        if not isinstance(claims, list) or not claims:
+            return None, [], []
+
+        try:
+            report = verify_claims(self.llm_client, claims=claims, papers=papers)
+        except Exception as exc:  # noqa: BLE001 - advisory gate must never break a run
+            return None, [], [f"论断—证据核验未执行: {exc}"]
+
+        artifacts = [
+            self._save_json(
+                project_name,
+                "writing",
+                "claim_evidence_verification.json",
+                report.to_dict(),
+            ),
+            self.artifact_store.save_artifact(
+                project_name,
+                "writing",
+                "claim_evidence_verification.md",
+                report.to_markdown(),
+            ),
+        ]
+
+        warnings = list(report.warnings)
+        if not report.passed:
+            warnings.append(
+                "论断—证据核验发现未被引用文献支持或缺乏引用的论断"
+                "（顾问级提示，未阻断）；请核对 claim_evidence_verification.md。"
+            )
+        return report, artifacts, warnings
+
     def _run_peer_review(
         self,
         config: ResearchPipelineConfig,
@@ -363,6 +415,7 @@ class ResearchPipeline:
         verification: Any,
         stats_verification: Any,
         dataset: DatasetAnalysis,
+        claim_report: ClaimVerificationReport | None,
     ) -> tuple[PeerReviewBundle | None, list[Path], list[str]]:
         """Run the simulated peer review as an *advisory* stage.
 
@@ -385,6 +438,9 @@ class ResearchPipeline:
                 ),
                 statistics_report=(
                     dataset.statistics.to_dict() if dataset.statistics is not None else None
+                ),
+                claim_verification=(
+                    claim_report.to_dict() if claim_report is not None else None
                 ),
                 reviewer_count=self.reviewer_count,
             )

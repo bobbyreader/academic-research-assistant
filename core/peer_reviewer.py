@@ -289,14 +289,15 @@ def _coerce_concerns(value: object) -> list[ReviewConcern]:
 
 
 # --------------------------------------------------------------------------- #
-# 确定性注入：把两个追溯门的结论转成审稿意见
+# 确定性注入：把三个追溯门的结论转成审稿意见
 # --------------------------------------------------------------------------- #
 def _deterministic_concerns(
     citation_verification: dict[str, Any],
     statistics_verification: dict[str, Any],
     statistics_report: dict[str, Any],
+    claim_verification: dict[str, Any],
 ) -> list[ReviewConcern]:
-    """把追溯校验结果转成审稿意见，避免审稿人放过已经失败的门。"""
+    """把三个追溯校验门的结论转成审稿意见，避免审稿人放过已经失败的门。"""
     concerns: list[ReviewConcern] = []
 
     unknown_markers = _coerce_str_list(citation_verification.get("unknown_markers"))
@@ -349,6 +350,33 @@ def _deterministic_concerns(
                     "统计报告未产生任何检验结果，正文中的定量结论缺乏统计支撑。"
                 ),
                 evidence="统计报告：tests = 0（未运行任何检验）",
+            )
+        )
+
+    unsupported_count = _coerce_score_like(claim_verification.get("unsupported_count"))
+    if unsupported_count > 0:
+        concerns.append(
+            ReviewConcern(
+                category="claim_traceability",
+                severity="major",
+                statement=(
+                    "有研究论断未能被其引用的文献支持：引用的文献存在，"
+                    "但摘要内容并不支持该论断。"
+                ),
+                evidence=f"论断核验：unsupported_count = {unsupported_count}",
+            )
+        )
+
+    without_evidence = _coerce_score_like(
+        claim_verification.get("claims_without_evidence_count")
+    )
+    if without_evidence > 0:
+        concerns.append(
+            ReviewConcern(
+                category="claim_traceability",
+                severity="minor",
+                statement="有研究论断未引用任何文献，缺乏证据支撑。",
+                evidence=f"论断核验：claims_without_evidence_count = {without_evidence}",
             )
         )
 
@@ -456,6 +484,7 @@ def _build_user_prompt(
     citation_verification: dict[str, Any],
     statistics_verification: dict[str, Any],
     statistics_report: dict[str, Any],
+    claim_verification: dict[str, Any],
 ) -> str:
     """为指定审稿角色构建用户提示词，重点要求逐字证据与追溯交叉核对。"""
     focus = {
@@ -493,9 +522,12 @@ def _build_user_prompt(
         f"{_compact(statistics_verification)}\n\n"
         "=== 推断统计报告 ===\n"
         f"{_compact(statistics_report)}\n\n"
+        "=== 论断—证据核验结果 ===\n"
+        f"{_compact(claim_verification)}\n\n"
         "请交叉核对上述追溯结果："
-        "如果存在无法追溯的引用（unknown_markers 非空），"
-        "或无法追溯的统计陈述（unmatched_count > 0），必须作为 concern 提出。\n\n"
+        "如果存在无法追溯的引用（unknown_markers 非空）、"
+        "无法追溯的统计陈述（unmatched_count > 0）、"
+        "或未被其引用文献支持的论断（unsupported_count > 0），必须作为 concern 提出。\n\n"
         "请严格按以下 JSON 结构输出（concerns 的 evidence 必须逐字引用稿件正文，"
         "否则该条意见将被丢弃）：\n"
         f"{output_schema}\n"
@@ -589,6 +621,7 @@ def review_manuscript(
     citation_verification: dict | None = None,
     statistics_verification: dict | None = None,
     statistics_report: dict | None = None,
+    claim_verification: dict | None = None,
     reviewer_count: int = 3,
 ) -> PeerReviewBundle:
     """对一份稿件执行证据约束的模拟同行评审。
@@ -604,10 +637,11 @@ def review_manuscript(
     citation = _safe_dict(citation_verification)
     statistics = _safe_dict(statistics_verification)
     stats_report = _safe_dict(statistics_report)
+    claims = _safe_dict(claim_verification)
 
     roles = list(REVIEWER_ROLES[: max(0, int(reviewer_count))])
 
-    deterministic = _deterministic_concerns(citation, statistics, stats_report)
+    deterministic = _deterministic_concerns(citation, statistics, stats_report, claims)
 
     reports: list[ReviewerReport] = []
     warnings: list[str] = []
@@ -620,6 +654,7 @@ def review_manuscript(
             citation_verification=citation,
             statistics_verification=statistics,
             statistics_report=stats_report,
+            claim_verification=claims,
         )
         try:
             payload = llm_client.complete_json(_SYSTEM_PROMPT, user_prompt)

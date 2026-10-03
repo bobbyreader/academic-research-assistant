@@ -77,6 +77,18 @@ class FakeLLM:
         self.body = body
 
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+        if "事实核查员" in system_prompt:
+            return {
+                "verdicts": [
+                    {
+                        "claim_index": 0,
+                        "citation_id": "P1",
+                        "verdict": "supports",
+                        "quote": "A finding.",
+                        "rationale": "摘要直接支持该论断。",
+                    }
+                ]
+            }
         if "审稿人" in system_prompt:
             return {
                 "summary": "结构清晰，证据强度有限。",
@@ -161,6 +173,17 @@ def test_every_handoff_carries_data_through_the_whole_chain(
 
     # --- analysis -> writing ------------------------------------------------
     assert (base / "analysis/research_analysis.md.v1").is_file()
+
+    # --- analysis claims -> claim-evidence gate -----------------------------
+    claims = json.loads(
+        (base / "writing/claim_evidence_verification.json.v1").read_text(encoding="utf-8")
+    )
+    assert claims["claim_count"] >= 1, "the analysis claims never reached the claim gate"
+    assert claims["passed"] is True
+    assert claims["claims"][0]["evidence"][0]["verdict"] == "supports"
+    assert claims["claims"][0]["evidence"][0]["quote"], (
+        "a verdict was accepted without a verbatim quote from the abstract"
+    )
 
     # --- writing -> citation integrity gate ---------------------------------
     citations = json.loads(

@@ -58,6 +58,18 @@ class FakeLLM:
         self.body = body
 
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+        if "事实核查员" in system_prompt:
+            return {
+                "verdicts": [
+                    {
+                        "claim_index": 0,
+                        "citation_id": "P1",
+                        "verdict": "supports",
+                        "quote": "A finding.",
+                        "rationale": "摘要直接支持该论断。",
+                    }
+                ]
+            }
         if "审稿人" in system_prompt:
             return {
                 "summary": "稿件结构清晰，但证据强度不足。",
@@ -411,6 +423,90 @@ def test_invalid_settings_fail_fast_before_any_work(tmp_path: Path) -> None:
     state = state_manager.load("badcfg")
     assert state is not None
     assert state.stage_status[WorkflowStage.SEARCH] == "pending"
+
+
+def test_pipeline_runs_claim_evidence_gate(tmp_path: Path) -> None:
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(),
+        doi_resolver=FakeResolver(),
+    )
+
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="claims",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+
+    writing = tmp_path / "projects/claims/artifacts/writing"
+    payload = json.loads(
+        (writing / "claim_evidence_verification.json.v1").read_text(encoding="utf-8")
+    )
+    assert payload["claim_count"] == 1
+    assert payload["unsupported_count"] == 0
+    assert payload["passed"] is True
+    assert (writing / "claim_evidence_verification.md.v1").is_file()
+    assert result.review is not None
+
+
+def test_unsupported_claim_is_advisory_and_reaches_the_review(tmp_path: Path) -> None:
+    """An unsupported claim must surface as a warning — never abort the run."""
+
+    class UnsupportedLLM(FakeLLM):
+        def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+            if "事实核查员" in system_prompt:
+                return {
+                    "verdicts": [
+                        {
+                            "claim_index": 0,
+                            "citation_id": "P1",
+                            "verdict": "unsupported",
+                            "quote": "A finding.",
+                            "rationale": "摘要与该论断无关。",
+                        }
+                    ]
+                }
+            return super().complete_json(system_prompt, user_prompt)
+
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=UnsupportedLLM(),
+        doi_resolver=FakeResolver(),
+    )
+
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="unsupported",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+
+    # Advisory by design: the run completes and the manuscript is still produced.
+    assert result.manuscript_path.exists()
+
+    payload = json.loads(
+        (
+            tmp_path
+            / "projects/unsupported/artifacts/writing/claim_evidence_verification.json.v1"
+        ).read_text(encoding="utf-8")
+    )
+    assert payload["passed"] is False
+    assert payload["unsupported_count"] == 1
+    assert any("论断—证据核验" in warning for warning in result.warnings)
+
+    # The cross-module contract: the peer review must pick the failure up.
+    assert result.review is not None
+    concerns = [
+        concern for report in result.review.reports for concern in report.concerns
+    ]
+    assert any("unsupported_count" in concern.evidence for concern in concerns)
 
 
 def _legacy_state_payload() -> dict:
