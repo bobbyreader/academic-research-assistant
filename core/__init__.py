@@ -1,13 +1,9 @@
-"""Core framework for Nature Skills workflow system."""
+"""Core framework for the research pipeline."""
 
-from .skill_bridge import BaseSkill, SkillOutput, SkillStatus
-from .state_manager import ProjectState, StateManager, WorkflowStage
 from .artifact_store import ArtifactStore
+from .state_manager import ProjectState, StateManager, WorkflowStage
 
 __all__ = [
-    "BaseSkill",
-    "SkillOutput",
-    "SkillStatus",
     "ProjectState",
     "StateManager",
     "WorkflowStage",

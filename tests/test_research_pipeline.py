@@ -1,0 +1,383 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from core.artifact_store import ArtifactStore
+from core.external_clients import PaperRecord, SearchReport
+from core.research_pipeline import (
+    ResearchPipeline,
+    ResearchPipelineConfig,
+    ResearchPipelineError,
+)
+from core.research_service import ResearchService
+from core.state_manager import ProjectState, StateManager, WorkflowStage
+
+
+class FakeResolver:
+    """Offline DOI resolver that records every DOI it is asked about."""
+
+    def __init__(self, resolved: bool = True) -> None:
+        self.resolved = resolved
+        self.checked: list[str] = []
+
+    def resolve(self, doi: str) -> tuple[bool, str | None]:
+        self.checked.append(doi)
+        return (self.resolved, None if self.resolved else "Crossref 未返回该 DOI 的元数据")
+
+
+class FakeSearcher:
+    def search(
+        self, query: str, sources: list[str], max_results: int
+    ) -> SearchReport:
+        assert query == "climate adaptation"
+        assert sources == ["crossref"]
+        assert max_results == 2
+        return SearchReport(
+            papers=[
+                PaperRecord(
+                    title="Climate adaptation evidence",
+                    authors=["A Author"],
+                    year=2024,
+                    journal="Research Journal",
+                    doi="10.1234/climate",
+                    abstract="A finding.",
+                    source="crossref",
+                )
+            ],
+            errors=[],
+        )
+
+
+class FakeLLM:
+    def __init__(self, body: str = "# Climate adaptation\n\n## Abstract\nA grounded draft.") -> None:
+        self.body = body
+
+    def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+        if "审稿人" in system_prompt:
+            return {
+                "summary": "稿件结构清晰，但证据强度不足。",
+                "strengths": ["主题明确"],
+                "concerns": [
+                    {
+                        "category": "methodology",
+                        "severity": "minor",
+                        "statement": "样本描述不足",
+                        "evidence": "A grounded draft.",
+                    }
+                ],
+                "recommendation": "minor_revision",
+                "score": 65,
+            }
+        assert "untrusted literature" in system_prompt
+        assert "Climate adaptation evidence" in user_prompt
+        return {
+            "research_question": "How does climate adaptation work?",
+            "key_findings": [
+                {"claim": "Adaptation is context-dependent", "citation_ids": ["P1"]}
+            ],
+            "research_gaps": ["More longitudinal evidence is needed"],
+            "proposed_methods": ["Compare cohorts over time"],
+        }
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        assert "P1" in user_prompt
+        return self.body
+
+
+class FailingReviewLLM(FakeLLM):
+    """Analysis succeeds but every simulated reviewer errors out."""
+
+    def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+        if "审稿人" in system_prompt:
+            raise RuntimeError("reviewer unavailable")
+        return super().complete_json(system_prompt, user_prompt)
+
+
+def test_pipeline_saves_search_analysis_and_manuscript_artifacts(
+    tmp_path: Path,
+) -> None:
+    resolver = FakeResolver()
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(),
+        doi_resolver=resolver,
+    )
+
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="climate",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+
+    assert result.manuscript_path is not None
+    assert result.manuscript_path.exists()
+    assert result.manuscript_path.read_text(encoding="utf-8").startswith(
+        "# Climate adaptation"
+    )
+
+    search_path = tmp_path / "projects/climate/artifacts/search/literature.json.v1"
+    assert json.loads(search_path.read_text(encoding="utf-8"))[0]["doi"] == (
+        "10.1234/climate"
+    )
+
+    analysis_path = tmp_path / (
+        "projects/climate/artifacts/analysis/research_analysis.json.v1"
+    )
+    assert json.loads(analysis_path.read_text(encoding="utf-8"))["research_question"] == (
+        "How does climate adaptation work?"
+    )
+
+    verification_path = tmp_path / (
+        "projects/climate/artifacts/writing/citation_verification.json.v1"
+    )
+    verification = json.loads(verification_path.read_text(encoding="utf-8"))
+    assert verification["passed"] is True
+    assert verification["unknown_markers"] == []
+    assert resolver.checked == ["10.1234/climate"]
+
+
+def test_pipeline_blocks_when_draft_cites_unknown_reference(tmp_path: Path) -> None:
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(body="# Draft\n\nEvidence says so [P9].\n"),
+        doi_resolver=FakeResolver(),
+    )
+
+    with pytest.raises(ResearchPipelineError, match="P9"):
+        pipeline.run(
+            ResearchPipelineConfig(
+                project_name="fabricated",
+                topic="climate adaptation",
+                sources=["crossref"],
+                max_results=2,
+            )
+        )
+
+    writing_dir = tmp_path / "projects/fabricated/artifacts/writing"
+    verification = json.loads(
+        (writing_dir / "citation_verification.json.v1").read_text(encoding="utf-8")
+    )
+    assert verification["passed"] is False
+    assert verification["unknown_markers"] == ["P9"]
+    # A draft with untraceable citations must never be persisted as the deliverable.
+    assert not (writing_dir / "manuscript.md.v1").exists()
+
+
+def test_pipeline_reports_unresolved_doi_as_warning(tmp_path: Path) -> None:
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(body="# Draft\n\nEvidence says so [P1].\n"),
+        doi_resolver=FakeResolver(resolved=False),
+    )
+
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="unresolved",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+
+    assert result.manuscript_path.exists()
+    assert any("DOI" in warning for warning in result.warnings)
+
+
+def test_missing_llm_key_marks_project_blocked(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("ARS_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("ARS_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    projects_dir = tmp_path / "projects"
+    state_manager = StateManager(projects_dir)
+    state_manager.save(
+        ProjectState(
+            name="blocked",
+            mode="hybrid",
+            current_stage=WorkflowStage.BRAINSTORMING,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="未配置 Gemini API 密钥"):
+        ResearchService(
+            projects_dir,
+            state_manager,
+            ArtifactStore(projects_dir),
+        ).run(
+            "blocked",
+            "a topic",
+            sources=["crossref"],
+            max_results=1,
+        )
+
+    state = state_manager.load("blocked")
+    assert state is not None
+    assert state.stage_status[WorkflowStage.SEARCH] == "blocked"
+
+
+def test_pipeline_with_dataset_produces_statistics_figures_and_traceability(
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data.csv"
+    data.write_text(
+        "group,score\nA,1\nA,2\nA,3\nA,4\nA,5\nB,6\nB,7\nB,8\nB,9\nB,10\n",
+        encoding="utf-8",
+    )
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(body="# Draft\n\nA difference was observed [P1] (p = 0.001).\n"),
+        doi_resolver=FakeResolver(),
+    )
+
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="dataset",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+            data_path=data,
+        )
+    )
+
+    artifacts = tmp_path / "projects/dataset/artifacts"
+    stats = json.loads(
+        (artifacts / "analysis/statistics_report.json.v1").read_text(encoding="utf-8")
+    )
+    assert stats["tests"][0]["test_name"] == "Welch t-test"
+    assert stats["tests"][0]["effect_size_name"] == "Cohen's d"
+
+    figures = json.loads(
+        (artifacts / "visualization/figures.json.v1").read_text(encoding="utf-8")
+    )
+    assert figures["figures"], "expected at least one figure for a numeric column"
+    figure_types = {figure["figure_type"] for figure in figures["figures"]}
+    assert "distribution" in figure_types
+
+    manuscript = result.manuscript_path.read_text(encoding="utf-8")
+    assert "# 推断统计分析报告" in manuscript  # statistics injected by the system
+    assert "# 图表清单" in manuscript  # figure list injected by the system
+    assert "## References" in manuscript
+
+    verification = json.loads(
+        (artifacts / "writing/statistics_verification.json.v1").read_text(encoding="utf-8")
+    )
+    assert verification["passed"] is True
+    assert verification["computed_p_values"], "computed p-values must be recorded"
+
+
+def test_pipeline_flags_invented_p_value_when_dataset_present(tmp_path: Path) -> None:
+    data = tmp_path / "data.csv"
+    data.write_text(
+        "group,score\nA,1\nA,2\nA,3\nA,4\nA,5\nB,6\nB,7\nB,8\nB,9\nB,10\n",
+        encoding="utf-8",
+    )
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(body="# Draft\n\nThe effect was decisive [P1] (p = 0.0001).\n"),
+        doi_resolver=FakeResolver(),
+    )
+
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="invented",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+            data_path=data,
+        )
+    )
+
+    verification = json.loads(
+        (tmp_path / "projects/invented/artifacts/writing/statistics_verification.json.v1")
+        .read_text(encoding="utf-8")
+    )
+    assert verification["passed"] is False
+    assert verification["unmatched_count"] == 1
+    assert any("统计陈述" in warning for warning in result.warnings)
+
+
+def test_pipeline_runs_advisory_peer_review(tmp_path: Path) -> None:
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(),
+        doi_resolver=FakeResolver(),
+    )
+
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="reviewed",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+
+    assert result.review is not None
+    assert result.review.decision == "minor_revision"
+    assert len(result.review.reports) == 1  # default reviewer_count is 1
+
+    review_dir = tmp_path / "projects/reviewed/artifacts/review"
+    payload = json.loads((review_dir / "review_reports.json.v1").read_text(encoding="utf-8"))
+    assert payload["decision"] == "minor_revision"
+    assert (review_dir / "review_reports.md.v1").exists()
+
+    # A review is advisory: a non-blocking verdict must never block the run.
+    assert result.manuscript_path.exists()
+
+
+def test_peer_review_failure_does_not_break_the_pipeline(tmp_path: Path) -> None:
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=FailingReviewLLM(),
+        doi_resolver=FakeResolver(),
+    )
+
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="noreview",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+
+    assert result.review is None
+    assert result.manuscript_path.exists()
+    assert any("模拟同行评审未执行" in warning for warning in result.warnings)
+
+
+def test_peer_review_can_be_disabled(tmp_path: Path) -> None:
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=FailingReviewLLM(),
+        doi_resolver=FakeResolver(),
+        reviewer_count=0,
+    )
+
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="noreview0",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+
+    assert result.review is None
+    assert not any("模拟同行评审未执行" in warning for warning in result.warnings)
+    assert not (tmp_path / "projects/noreview0/artifacts/review").exists()

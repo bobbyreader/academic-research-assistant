@@ -1,17 +1,20 @@
 """科研工作流主调度器。
 
-提供 CLI 接口用于项目管理、工作流执行、状态查询和产出物导出。
+提供 CLI 接口用于项目管理、真实研究执行、状态查询和产出物导出。
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Literal
 
 from core.artifact_store import ArtifactStore
-from core.skill_bridge import SkillBridge
+from core.export_service import export_pdf, export_pptx
+from core.research_pipeline import PipelineResult
+from core.research_service import ResearchService
 from core.state_manager import ProjectState, StateManager, WorkflowStage
 
 # 类型别名
@@ -22,7 +25,7 @@ WorkflowMode = Literal["lightweight", "heavyweight", "hybrid"]
 class Orchestrator:
     """科研工作流主调度器。
 
-    负责协调各个核心组件（状态管理、产出物存储、Skill 桥接），
+    负责协调各个核心组件（状态管理、产出物存储、研究管线），
     提供统一的 CLI 接口。
     """
 
@@ -38,7 +41,9 @@ class Orchestrator:
 
         self.state_manager = StateManager(self.projects_dir)
         self.artifact_store = ArtifactStore(self.projects_dir)
-        self.skill_bridge = SkillBridge()
+        self.research_service = ResearchService(
+            self.projects_dir, self.state_manager, self.artifact_store
+        )
 
     def init_project(self, project_name: str, mode: WorkflowMode = "lightweight") -> Path:
         """初始化新项目。
@@ -74,62 +79,11 @@ class Orchestrator:
         print(f"     路径: {project_dir}")
         return project_dir
 
-    def run_workflow(
-        self,
-        project_name: str,
-        workflow_name: str | None = None,
-        resume_from_checkpoint: bool = False,
-    ) -> None:
-        """运行项目工作流。
-
-        Args:
-            project_name: 项目名称。
-            workflow_name: 工作流名称，默认使用项目初始化时的模式。
-            resume_from_checkpoint: 是否从最近的 checkpoint 恢复。
-
-        Raises:
-            FileNotFoundError: 项目不存在。
-        """
-        state = self.state_manager.load(project_name)
-        if state is None:
-            raise FileNotFoundError(f"项目 '{project_name}' 不存在")
-
-        mode = workflow_name or state.mode
-        print(f"[RUN] 项目: {project_name} | 模式: {mode}")
-        print(f"      当前阶段: {state.current_stage.value}")
-
-        if resume_from_checkpoint:
-            checkpoint = self.state_manager.load_latest_checkpoint(project_name)
-            if checkpoint:
-                state = checkpoint
-                print(f"      从 checkpoint 恢复: {state.current_stage.value}")
-
-        # 按阶段顺序执行
-        stages = self._get_stage_sequence(mode)
-        current_idx = stages.index(state.current_stage)
-
-        for stage in stages[current_idx:]:
-            state.current_stage = stage
-            state.stage_status[stage] = "in_progress"
-            self.state_manager.save(state)
-            self.state_manager.save_checkpoint(project_name, state)
-
-            print(f"  [STAGE] {stage.value} ...")
-
-            # 模拟阶段执行（实际由具体 Skill 实现）
-            try:
-                self._execute_stage(project_name, stage, state)
-                state.stage_status[stage] = "completed"
-                print(f"  [OK] {stage.value} 完成")
-            except Exception as e:
-                state.stage_status[stage] = "blocked"
-                self.state_manager.save(state)
-                print(f"  [ERROR] {stage.value} 失败: {e}")
-                raise
-
-            self.state_manager.save(state)
-
-        print(f"[DONE] 工作流执行完成")
+    def run_real_research(
+        self, project_name: str, topic: str, **options: object
+    ) -> PipelineResult:
+        """Run real search, LLM analysis, drafting, and artifact persistence."""
+        return self.research_service.run(project_name, topic, **options)
 
     def show_status(self, project_name: str) -> None:
         """显示项目状态。
@@ -233,65 +187,6 @@ class Orchestrator:
         print(f"[OK] 导出完成: {export_file}")
         return export_file
 
-    def _get_stage_sequence(self, mode: WorkflowMode) -> list[WorkflowStage]:
-        """获取指定模式的阶段执行顺序。
-
-        Args:
-            mode: 工作流模式。
-
-        Returns:
-            阶段列表（按执行顺序）。
-        """
-        sequences: dict[WorkflowMode, list[WorkflowStage]] = {
-            "lightweight": [
-                WorkflowStage.BRAINSTORMING,
-                WorkflowStage.SEARCH,
-                WorkflowStage.LIT_REVIEW,
-                WorkflowStage.WRITING,
-                WorkflowStage.EXPORT,
-            ],
-            "heavyweight": [
-                WorkflowStage.BRAINSTORMING,
-                WorkflowStage.SEARCH,
-                WorkflowStage.LIT_REVIEW,
-                WorkflowStage.STATISTICS,
-                WorkflowStage.VISUALIZATION,
-                WorkflowStage.WRITING,
-                WorkflowStage.POLISHING,
-                WorkflowStage.REVIEW,
-                WorkflowStage.EXPORT,
-            ],
-            "hybrid": [
-                WorkflowStage.BRAINSTORMING,
-                WorkflowStage.SEARCH,
-                WorkflowStage.LIT_REVIEW,
-                WorkflowStage.STATISTICS,
-                WorkflowStage.VISUALIZATION,
-                WorkflowStage.WRITING,
-                WorkflowStage.POLISHING,
-                WorkflowStage.EXPORT,
-            ],
-        }
-        return sequences.get(mode, sequences["lightweight"])
-
-    def _execute_stage(
-        self,
-        project_name: str,
-        stage: WorkflowStage,
-        state: ProjectState,
-    ) -> None:
-        """执行单个工作流阶段（占位实现）。
-
-        实际执行逻辑由具体的 Skill 模块提供，此处仅做状态记录。
-
-        Args:
-            project_name: 项目名称。
-            stage: 当前阶段。
-            state: 项目状态对象。
-        """
-        # TODO: 接入具体 Skill 实现
-        pass
-
     def _export_markdown(
         self,
         output_path: Path,
@@ -299,21 +194,37 @@ class Orchestrator:
         artifacts: dict[str, list[Path]],
     ) -> None:
         """导出为 Markdown 格式。"""
+        manuscript = self.artifact_store.get_artifact(
+            state.name, "writing", "manuscript.md"
+        )
+        if manuscript:
+            output_path.write_text(
+                manuscript.read_text(encoding="utf-8")
+                + "\n\n---\n\n## 项目产出物\n\n"
+                + "\n".join(
+                    f"- [{f.name}]({os.path.relpath(f, output_path.parent)})"
+                    for files in artifacts.values()
+                    for f in files
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return
         lines = [
             f"# {state.name} - 研究报告",
-            f"",
+            "",
             f"- 工作流模式: {state.mode}",
             f"- 导出时间: {state.updated_at}",
-            f"",
-            f"---",
-            f"",
+            "",
+            "---",
+            "",
         ]
 
         for stage, files in artifacts.items():
             lines.append(f"## {stage}")
             lines.append("")
             for f in files:
-                lines.append(f"- [{f.name}]({f.relative_to(output_path.parent)})")
+                lines.append(f"- [{f.name}]({os.path.relpath(f, output_path.parent)})")
             lines.append("")
 
         output_path.write_text("\n".join(lines), encoding="utf-8")
@@ -324,12 +235,13 @@ class Orchestrator:
         state: ProjectState,
         artifacts: dict[str, list[Path]],
     ) -> None:
-        """导出为 PDF 格式（占位实现）。"""
-        # TODO: 接入 PDF 生成库（如 reportlab, weasyprint）
-        output_path.write_text(
-            f"PDF 导出占位符\n项目: {state.name}\n",
-            encoding="utf-8",
+        """将最新手稿导出为 PDF。"""
+        manuscript = self.artifact_store.get_artifact(
+            state.name, "writing", "manuscript.md"
         )
+        if manuscript is None:
+            raise ValueError("没有可导出的 writing/manuscript.md")
+        export_pdf(manuscript, output_path)
 
     def _export_pptx(
         self,
@@ -337,11 +249,19 @@ class Orchestrator:
         state: ProjectState,
         artifacts: dict[str, list[Path]],
     ) -> None:
-        """导出为 PPTX 格式（占位实现）。"""
-        # TODO: 接入 python-pptx
-        output_path.write_text(
-            f"PPTX 导出占位符\n项目: {state.name}\n",
-            encoding="utf-8",
+        """将最新手稿转换为 PPTX 大纲。"""
+        manuscript = self.artifact_store.get_artifact(
+            state.name, "writing", "manuscript.md"
+        )
+        outline = self.artifact_store.get_artifact(
+            state.name, "communication", "presentation_outline.md"
+        )
+        if manuscript is None:
+            raise ValueError("没有可导出的 writing/manuscript.md")
+        export_pptx(
+            outline or manuscript,
+            output_path,
+            Path(__file__).parent / "scripts/export_pptx.py",
         )
 
 
@@ -352,8 +272,8 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python orchestrator.py init my_project --mode heavyweight
-  python orchestrator.py run my_project --workflow hybrid
+  python orchestrator.py research my_paper --topic "你的研究主题" --export md
+  python orchestrator.py init my_project --mode hybrid
   python orchestrator.py status my_project
   python orchestrator.py list
   python orchestrator.py export my_project --format pdf
@@ -378,14 +298,31 @@ def main() -> None:
         help="工作流模式（默认: lightweight）",
     )
 
-    # run 命令
-    run_parser = subparsers.add_parser("run", help="运行工作流")
-    run_parser.add_argument("project_name", help="项目名称")
-    run_parser.add_argument("--workflow", help="工作流名称（覆盖默认模式）")
-    run_parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="从最近的 checkpoint 恢复",
+    # research 命令
+    research_parser = subparsers.add_parser(
+        "research", help="从研究主题自动检索、分析、写作并导出"
+    )
+    research_parser.add_argument("project_name", help="项目名称")
+    research_parser.add_argument("--topic", required=True, help="研究主题")
+    research_parser.add_argument(
+        "--mode", choices=["lightweight", "heavyweight", "hybrid"], default="hybrid"
+    )
+    research_parser.add_argument(
+        "--sources",
+        default="crossref,pubmed,semantic_scholar",
+        help="检索源，逗号分隔",
+    )
+    research_parser.add_argument("--max-results", type=int, default=10)
+    research_parser.add_argument("--data", type=Path, help="可选实验数据 CSV")
+    research_parser.add_argument(
+        "--provider",
+        choices=["codex_cli", "gemini", "openai_compatible"],
+        help="LLM 提供商（默认读取 settings.yaml 或环境变量）",
+    )
+    research_parser.add_argument("--model", help="LLM 模型名")
+    research_parser.add_argument("--base-url", help="OpenAI 兼容 API 地址")
+    research_parser.add_argument(
+        "--export", default="md", help="导出格式：md、pdf、pptx 或 all"
     )
 
     # status 命令
@@ -421,12 +358,25 @@ def main() -> None:
     try:
         if args.command == "init":
             orchestrator.init_project(args.project_name, args.mode)
-        elif args.command == "run":
-            orchestrator.run_workflow(
+        elif args.command == "research":
+            if orchestrator.state_manager.load(args.project_name) is None:
+                orchestrator.init_project(args.project_name, args.mode)
+            else:
+                print(f"[INFO] 复用已有项目 '{args.project_name}' 并创建新版本产物")
+            orchestrator.run_real_research(
                 args.project_name,
-                args.workflow,
-                args.resume,
+                args.topic,
+                sources=[item.strip() for item in args.sources.split(",") if item.strip()],
+                max_results=args.max_results,
+                data_path=args.data,
+                provider=args.provider,
+                model=args.model,
+                base_url=args.base_url,
             )
+            formats = ["md", "pdf", "pptx"] if args.export == "all" else [args.export]
+            for export_format in formats:
+                orchestrator.export(args.project_name, export_format)
+            print("[DONE] 真实研究工作流执行完成")
         elif args.command == "status":
             orchestrator.show_status(args.project_name)
         elif args.command == "list":
@@ -437,7 +387,7 @@ def main() -> None:
                 args.format,
                 args.output,
             )
-    except (FileNotFoundError, FileExistsError, ValueError) as e:
+    except (FileNotFoundError, FileExistsError, ValueError, RuntimeError) as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:

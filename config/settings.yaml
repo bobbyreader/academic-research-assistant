@@ -15,12 +15,20 @@ api_keys:
   elsevier_key: ""  # Elsevier API（可选，不要写入仓库）
   crossref_email: ""  # CrossRef 礼貌池
 
+# LLM 配置。密钥优先从环境变量读取，不要提交到仓库。
+llm:
+  provider: "codex_cli"  # codex_cli、gemini 或 openai_compatible
+  model: ""  # 留空则使用本机 Codex CLI 的默认模型
+  base_url: ""
+  timeout_seconds: 120
+
 # 检索设置
 search:
   default_databases: ["crossref", "pubmed", "arxiv", "semantic_scholar"]
   max_results_per_source: 50
   default_year_range: ["2019", "2024"]
   deduplication_fields: ["doi", "title"]
+  real_sources: ["crossref", "pubmed", "semantic_scholar", "arxiv"]
 
 # 引用格式
 citation:
@@ -46,7 +54,7 @@ writing:
 
 # 审稿设置
 review:
-  reviewer_count: 3
+  reviewer_count: 1  # 模拟审稿人数量（0 = 关闭评审阶段）；每增加一位多一次 LLM 调用
   include_devil_advocate: true
   consensus_threshold: 2  # 至少几位 reviewer 提出才列为共识
   score_scale: [0, 100]

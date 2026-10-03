@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +53,10 @@ class ArtifactStore:
         stage_dir.mkdir(parents=True, exist_ok=True)
 
         # 检查现有版本
-        existing = sorted(stage_dir.glob(f"{filename}.v*"))
+        existing = sorted(
+            path for path in stage_dir.glob(f"{filename}.v*")
+            if not path.name.endswith(".meta")
+        )
         version = len(existing) + 1
 
         # 保存新版本
@@ -70,7 +72,7 @@ class ArtifactStore:
         meta_file = stage_dir / f"{filename}.v{version}.meta"
         meta_content = {
             "version": version,
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "original_filename": filename,
             **(metadata or {}),
         }
@@ -106,7 +108,10 @@ class ArtifactStore:
             return file_path if file_path.exists() else None
 
         # 获取最新版本
-        existing = sorted(stage_dir.glob(f"{filename}.v*"))
+        existing = sorted(
+            path for path in stage_dir.glob(f"{filename}.v*")
+            if not path.name.endswith(".meta")
+        )
         if not existing:
             return None
         return existing[-1]

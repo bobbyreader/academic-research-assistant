@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#173b38" />
+    <title>研究助手 · Research Desk</title>
+    <script>
+      if (window.location.protocol === "file:") {
+        document.documentElement.classList.add("direct-file-preview");
+      }
+    </script>
+    <style>
+      #local-file-notice { display: none; }
+      .direct-file-preview .app-shell { display: none !important; }
+      .direct-file-preview #local-file-notice {
+        background: #fffefa;
+        border: 1px solid #d7dfd8;
+        border-radius: 16px;
+        color: #102321;
+        display: block;
+        font-family: "Avenir Next", "PingFang SC", sans-serif;
+        line-height: 1.65;
+        margin: 12vh auto;
+        max-width: 620px;
+        padding: 32px;
+      }
+      .direct-file-preview #local-file-notice p { color: #66736d; }
+      .direct-file-preview #local-file-notice a { color: #b9523c; font-weight: 700; }
+    </style>
+    <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}" />
+  </head>
+  <body>
+    <main id="local-file-notice" role="alert">
+      <p>打开方式不对</p>
+      <h1>请双击“启动研究助手.command”</h1>
+      <p>这个文件需要由研究助手的本地服务运行。直接双击 <code>web/templates/index.html</code> 时，页面的样式和功能不会加载。</p>
+      <p>启动器会自动打开正确的本机地址；请不要直接打开这个模板文件。</p>
+    </main>
+    <div class="page-halo" aria-hidden="true"></div>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="研究助手首页">
+          <span class="brand-mark">R</span>
+          <span>
+            <strong>RESEARCH DESK</strong>
+            <small>研究工作台</small>
+          </span>
+        </a>
+        <div class="topbar-meta">
+          <span class="local-status"><i aria-hidden="true"></i>仅本机运行</span>
+          <button class="icon-button" id="refresh-projects" type="button" aria-label="刷新项目列表">刷新</button>
+        </div>
+      </header>
+
+      <main>
+        <section class="intro reveal">
+          <p class="eyebrow">RESEARCH WORKBENCH / 01</p>
+          <div class="intro-content">
+            <div>
+              <h1>先说清问题，<em>再开始研究。</em></h1>
+              <p>研究助手会按步骤检索真实文献、整理证据、起草内容并导出结果。你只需要完成三次简单选择。</p>
+            </div>
+            <div class="intro-aside"><span>3</span><p>个简单步骤<br />一次完整研究</p></div>
+          </div>
+        </section>
+
+        <div class="research-layout">
+          <section class="setup-card reveal delay-1" aria-labelledby="setup-title">
+            <header class="setup-header">
+              <div>
+                <p class="eyebrow">NEW RESEARCH</p>
+                <h2 id="setup-title">建立你的研究任务</h2>
+              </div>
+              <span class="time-note">通常需要几分钟</span>
+            </header>
+
+            <nav class="stepper" aria-label="研究设置步骤">
+              <button class="wizard-step is-active" type="button" data-step-target="1" aria-current="step">
+                <span>01</span><strong>定义主题</strong>
+              </button>
+              <span class="step-line" aria-hidden="true"></span>
+              <button class="wizard-step" type="button" data-step-target="2">
+                <span>02</span><strong>配置资料</strong>
+              </button>
+              <span class="step-line" aria-hidden="true"></span>
+              <button class="wizard-step" type="button" data-step-target="3">
+                <span>03</span><strong>确认启动</strong>
+              </button>
+            </nav>
+
+            <form id="research-form" novalidate>
+              <section class="wizard-page is-active" data-step-page="1" aria-labelledby="topic-step-title">
+                <div class="step-heading">
+                  <span>01</span>
+                  <div><h3 id="topic-step-title">从一个清楚的问题开始</h3><p>一句完整的问题，或一个你想探索的研究方向就足够了。</p></div>
+                </div>
+                <div class="field-group field-topic">
+                  <label for="topic">研究主题 <span class="required">必填</span></label>
+                  <textarea id="topic" name="topic" rows="5" required placeholder="例如：人工智能如何影响高等教育质量保障？"></textarea>
+                </div>
+                <div class="form-row scope-row">
+                  <div class="field-group">
+                    <label for="project-name">项目名称 <span class="optional">可选</span></label>
+                    <input id="project-name" name="project_name" type="text" placeholder="留空则自动命名" autocomplete="off" />
+                  </div>
+                  <div class="field-group compact-field">
+                    <label for="max-results">每个来源</label>
+                    <select id="max-results" name="max_results">
+                      <option value="5">5 篇</option>
+                      <option value="10" selected>10 篇</option>
+                      <option value="20">20 篇</option>
+                      <option value="30">30 篇</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="step-actions end"><button class="next-button" type="button" data-next-step="2">继续：选择资料 <span>→</span></button></div>
+              </section>
+
+              <section class="wizard-page" data-step-page="2" aria-labelledby="source-step-title" hidden>
+                <div class="step-heading">
+                  <span>02</span>
+                  <div><h3 id="source-step-title">选择证据从哪里来</h3><p>默认组合覆盖综合、医学与引用网络。你可以按研究主题调整。</p></div>
+                </div>
+                <fieldset class="choice-group">
+                  <legend>文献来源</legend>
+                  <div class="source-grid">
+                    <label class="select-card source-card selected">
+                      <input type="checkbox" name="sources" value="crossref" checked />
+                      <span class="choice-top"><i>C</i><b>综合</b><em>已选</em></span>
+                      <strong>Crossref</strong><small>期刊、图书与学术出版物</small>
+                    </label>
+                    <label class="select-card source-card selected">
+                      <input type="checkbox" name="sources" value="pubmed" checked />
+                      <span class="choice-top"><i>P</i><b>医学</b><em>已选</em></span>
+                      <strong>PubMed</strong><small>医学、健康与生命科学</small>
+                    </label>
+                    <label class="select-card source-card selected">
+                      <input type="checkbox" name="sources" value="semantic_scholar" checked />
+                      <span class="choice-top"><i>S</i><b>引用</b><em>已选</em></span>
+                      <strong>Semantic Scholar</strong><small>论文关系与引用网络</small>
+                    </label>
+                    <label class="select-card source-card">
+                      <input type="checkbox" name="sources" value="arxiv" />
+                      <span class="choice-top"><i>A</i><b>预印本</b><em>已选</em></span>
+                      <strong>arXiv</strong><small>新方向与预印本研究</small>
+                    </label>
+                  </div>
+                </fieldset>
+                <fieldset class="choice-group engine-group">
+                  <legend>内容生成引擎</legend>
+                  <div class="engine-grid">
+                    <label class="select-card engine-card selected">
+                      <input type="radio" name="provider" value="codex_cli" checked />
+                      <span class="choice-top"><i>C</i><b>推荐</b><em>已选</em></span>
+                      <strong>本机 Codex</strong><small>使用这台电脑已登录的 Codex，无需另填 API 密钥</small>
+                    </label>
+                    <label class="select-card engine-card">
+                      <input type="radio" name="provider" value="gemini" />
+                      <span class="choice-top"><i>G</i><b>API</b><em>已选</em></span>
+                      <strong>Gemini</strong><small>使用已配置的 Gemini API 密钥</small>
+                    </label>
+                    <label class="select-card engine-card">
+                      <input type="radio" name="provider" value="openai_compatible" />
+                      <span class="choice-top"><i>A</i><b>API</b><em>已选</em></span>
+                      <strong>兼容 API</strong><small>使用已配置的 OpenAI 兼容服务</small>
+                    </label>
+                  </div>
+                </fieldset>
+                <label class="upload-zone" for="data-file">
+                  <span class="upload-icon">＋</span>
+                  <span><strong>补充实验数据</strong><small>可选：上传 CSV，把描述性统计加入分析</small></span>
+                  <span class="file-name" id="file-name">未选择文件</span>
+                  <input id="data-file" name="data_file" type="file" accept=".csv,text/csv" />
+                </label>
+                <div class="step-actions"><button class="back-button" type="button" data-prev-step="1">← 返回主题</button><button class="next-button" type="button" data-next-step="3">继续：确认输出 <span>→</span></button></div>
+              </section>
+
+              <section class="wizard-page" data-step-page="3" aria-labelledby="export-step-title" hidden>
+                <div class="step-heading">
+                  <span>03</span>
+                  <div><h3 id="export-step-title">选择交付物，然后开始</h3><p>结果会保存在本机项目中。PDF 或 PPTX 无法生成时，Markdown 草稿仍会保留。</p></div>
+                </div>
+                <fieldset class="export-group">
+                  <legend>你希望获得什么？</legend>
+                  <div class="export-grid">
+                    <label class="select-card export-tile selected"><input type="checkbox" name="exports" value="md" checked /><span class="format-badge">MD</span><span><strong>研究草稿</strong><small>便于继续修改</small></span><em>✓</em></label>
+                    <label class="select-card export-tile selected"><input type="checkbox" name="exports" value="pdf" checked /><span class="format-badge">PDF</span><span><strong>阅读版</strong><small>便于分享与存档</small></span><em>✓</em></label>
+                    <label class="select-card export-tile selected"><input type="checkbox" name="exports" value="pptx" checked /><span class="format-badge">PPT</span><span><strong>汇报提纲</strong><small>便于进一步演示</small></span><em>✓</em></label>
+                  </div>
+                </fieldset>
+                <div class="launch-review" aria-live="polite">
+                  <span>本次设置</span>
+                  <p id="launch-summary">等待确认研究主题与资料来源。</p>
+                </div>
+                <div class="step-actions"><button class="back-button" type="button" data-prev-step="2">← 返回资料</button><button class="primary-button" id="start-button" type="submit"><span>开始研究</span><b>→</b></button></div>
+              </section>
+              <div class="form-message" id="form-message" role="alert" aria-live="polite"></div>
+            </form>
+          </section>
+
+          <aside class="companion reveal delay-2" aria-label="研究概览与进度">
+            <section class="brief-card">
+              <div class="card-label"><span>LIVE BRIEF</span><i aria-hidden="true"></i></div>
+              <h2>本次研究</h2>
+              <dl class="research-brief">
+                <div><dt>研究主题</dt><dd id="brief-topic">尚未填写</dd></div>
+                <div><dt>文献来源</dt><dd id="brief-sources">3 个默认来源</dd></div>
+                <div><dt>交付文件</dt><dd id="brief-exports">3 种格式</dd></div>
+                <div><dt>内容生成</dt><dd id="brief-provider">本机 Codex</dd></div>
+              </dl>
+              <p class="privacy-note"><span>⌂</span> 在你的电脑本地运行；密钥不会显示在页面中。</p>
+            </section>
+
+            <section class="progress-card" aria-labelledby="progress-title">
+              <div class="progress-heading"><div><p class="eyebrow">RESEARCH PATH</p><h2 id="progress-title">执行轨迹</h2></div><span class="status-pill idle" id="status-pill">等待开始</span></div>
+              <div class="progress-intro" id="progress-intro"><span class="path-mark">R</span><p id="progress-title-text">研究开始后，这里会显示每个阶段的进度。</p></div>
+              <ol class="stage-list" id="stage-list">
+                <li data-stage="search"><span>01</span><strong>真实检索</strong><em class="stage-state">待开始</em></li>
+                <li data-stage="lit_review"><span>02</span><strong>证据分析</strong><em class="stage-state">待开始</em></li>
+                <li data-stage="writing"><span>03</span><strong>研究写作</strong><em class="stage-state">待开始</em></li>
+                <li data-stage="export"><span>04</span><strong>整理下载</strong><em class="stage-state">待开始</em></li>
+              </ol>
+              <p class="progress-footer" id="progress-footer">暂未运行任务</p>
+            </section>
+          </aside>
+        </div>
+
+        <section class="results-panel hidden reveal" id="results-panel" aria-labelledby="results-title">
+          <div class="results-heading"><div><p class="eyebrow">COMPLETE</p><h2 id="results-title">结果已准备好</h2></div><span class="status-pill done">可以下载</span></div>
+          <div class="result-content"><div class="result-summary"><span>✦</span><div><strong id="result-project">研究项目</strong><p id="result-summary-text">你的研究草稿和相关产物已经整理完成。</p></div></div><div class="download-list" id="download-list"></div></div>
+          <div class="warning-box hidden" id="warning-box"><strong>需要留意</strong><ul id="warning-list"></ul></div>
+        </section>
+
+        <section class="recent-section reveal delay-3" aria-labelledby="recent-title">
+          <div class="section-heading-line"><div><p class="eyebrow">SAVED LOCALLY</p><h2 id="recent-title">最近的项目</h2></div><span>保留在本机</span></div>
+          <div class="recent-list" id="recent-list"><div class="empty-projects">还没有项目。完成第一次研究后，它会出现在这里。</div></div>
+        </section>
+      </main>
+
+      <footer class="footer"><span>RESEARCH DESK / EVIDENCE FIRST</span><span>LOCAL · PRIVATE BY DEFAULT</span></footer>
+    </div>
+    <script>
+      if (window.location.protocol !== "file:") {
+        const appScript = document.createElement("script");
+        appScript.src = "{{ url_for('static', filename='app.js') }}";
+        document.body.append(appScript);
+      }
+    </script>
+  </body>
+</html>
