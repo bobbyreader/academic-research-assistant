@@ -91,6 +91,17 @@ OKABE_ITO: tuple[str, ...] = (
 # 配色注册表，便于未来扩展。
 _PALETTES: dict[str, tuple[str, ...]] = {"okabe_ito": OKABE_ITO}
 
+#: 配置中 ``figures.color_palette`` 的默认值。``"default"`` 是注册表里
+#: ``okabe_ito`` 的别名——保持既有默认配色不变（这是逐字节回归的前提）。
+_DEFAULT_PALETTE = "default"
+
+#: ``figures.color_palette`` 取值 -> 内部配色名。仅登记**真实存在**的配色；
+#: 未登记的取值按「未知」处理（见 :func:`_resolve_palette`）。
+_PALETTE_ALIASES: dict[str, str] = {"default": "okabe_ito"}
+
+#: 支持的位图/矢量文件格式（``default_format`` 与 ``formats`` 均以此校验）。
+_SUPPORTED_FORMATS: frozenset[str] = frozenset({"png", "pdf", "svg"})
+
 # 分组列允许的组数上下限（与 statistics_engine 保持一致）。
 _MIN_GROUPS = 2
 _MAX_GROUPS = 12
@@ -196,12 +207,33 @@ class FigureBundle:
 
 
 def _resolve_palette(palette: str) -> tuple[str, ...]:
-    """解析配色名，未知名称回退到默认的 Okabe-Ito。"""
-    return _PALETTES.get(palette, OKABE_ITO)
+    """解析配色名。
+
+    仅登记在 :data:`_PALETTE_ALIASES` / :data:`_PALETTES` 中的名称可用；
+    未登记的**未知名称**回退到默认的 Okabe-Ito，并（由调用方）记录一条警告，
+    以免"看起来配置了配色其实没生效"。
+    """
+    name = _PALETTE_ALIASES.get(palette, palette)
+    return _PALETTES.get(name, OKABE_ITO)
 
 
-def _configure_style() -> str:
-    """配置全局绘图样式，返回实际生效的字体名。
+def _is_known_palette(palette: str) -> bool:
+    """``palette`` 是否为已登记的配色名（或其别名）。"""
+    name = _PALETTE_ALIASES.get(palette, palette)
+    return name in _PALETTES
+
+
+def _normalise_formats(formats: tuple[str, ...]) -> tuple[str, ...]:
+    """把格式名规范化（小写、去首尾空白、去空项）。"""
+    return tuple(fmt.strip().lower() for fmt in formats if fmt and fmt.strip())
+
+
+def _configure_style(
+    *,
+    font_family: str = "",
+    font_size_pt: int = 10,
+) -> tuple[str, bool]:
+    """配置全局绘图样式，返回 ``(实际生效的字体名, 是否应用了请求的字体族)``。
 
     图件标题与坐标轴标签包含中文，因此字体首选必须是「能渲染中文字形」的字体，
     否则中文会渲染为方框（tofu）。策略：
@@ -211,6 +243,17 @@ def _configure_style() -> str:
       3. 全部缺失时回退到 matplotlib 自带的 DejaVu Sans（可能无法显示中文，
          但绝不抛错）。
     整个过程中绝不因缺少字体而抛错。
+
+    Args:
+        font_family: 请求的字体族；留空表示沿用内置的 CJK 优先链。
+            **仅当该字体确实安装**时才把它置于字体链最前并返回 ``True``；
+            否则字体链保持不变并返回 ``False``（调用方据此记录警告——我们
+            绝不假装接入了一个系统里并不存在的字体）。
+        font_size_pt: 基础字号（磅）。轴标签 / 刻度的基准字号，必须为正；
+            ``axes.titlesize`` 相对它 +2，其余沿用其值。
+
+    Returns:
+        ``(实际生效的字体名, 是否应用了请求的字体族)``。
     """
     import matplotlib.font_manager as fm
 
@@ -253,22 +296,35 @@ def _configure_style() -> str:
         if name not in seen:
             seen.append(name)
 
+    font_family_applied = False
+    if font_family and _present(font_family):
+        # 用户显式请求且系统中确实存在：置于链首（同时保留原有字体作为回退，
+        # 以保证中文字形仍可渲染）。
+        seen = [font_family] + [name for name in seen if name != font_family]
+        font_family_applied = True
+
+    base = font_size_pt
+
+    # 字号映射：历史默认（font_size_pt=10）下必须精确得到
+    #   titlesize=13, labelsize=12, ticks/legend=10 —— 这是逐字节回归的前提。
+    # 因此各元素相对 base 采用"在 10 之上的固定偏移"，而非统一等于 base：
+    #   title = base + 3, label = base + 2, tick/legend = base。
     plt.rcParams.update(
         {
             "font.family": "sans-serif",
             "font.sans-serif": seen,
             "axes.spines.top": False,
             "axes.spines.right": False,
-            "axes.titlesize": 13,
-            "axes.labelsize": 12,
-            "xtick.labelsize": 10,
-            "ytick.labelsize": 10,
-            "legend.fontsize": 10,
+            "axes.titlesize": base + 3,
+            "axes.labelsize": base + 2,
+            "xtick.labelsize": base,
+            "ytick.labelsize": base,
+            "legend.fontsize": base,
             "figure.autolayout": False,
             "axes.unicode_minus": False,
         }
     )
-    return seen[0] if seen else "DejaVu Sans"
+    return (seen[0] if seen else "DejaVu Sans"), font_family_applied
 
 
 def _despine(ax: Axes) -> None:
@@ -629,7 +685,11 @@ def build_figures(
     group_column: str | None = None,
     dpi: int = 300,
     palette: str = "okabe_ito",
-    formats: tuple[str, ...] = ("png",),
+    formats: tuple[str, ...] | None = None,
+    default_journal: str = "",
+    default_format: str = "png",
+    font_family: str = "",
+    font_size_pt: int = 10,
 ) -> FigureBundle:
     """把 CSV 数据集转换为论文可用的图件集合。
 
@@ -640,25 +700,64 @@ def build_figures(
             识别唯一的分类列（取值 2..12）；若存在多个候选则记录警告并跳过。
         dpi: 位图分辨率。
         palette: 配色名，默认 Okabe-Ito 色盲友好配色。
-        formats: 需要导出的文件格式，例如 ("png", "pdf")。
+        formats: 需要导出的文件格式，例如 ("png", "pdf")。为 None（默认）时改用
+            ``default_format``（见下）作为唯一格式——这与改动前 ``formats`` 默认
+            为 ``("png",)`` 的行为在缺省参数下完全一致。
+        default_journal: 目标期刊名。**当前未接入任何绘图逻辑**——matplotlib
+            没有"期刊样式"这一概念，本后端也无法据期刊名推导尺寸/字号；因此
+            该参数目前只用于在**非空时**记录一条"未生效"的警告，绝不假装接上。
+        default_format: 当 ``formats`` 为 None 时采用的单一默认格式（png/pdf/svg）。
+            显式传入 ``formats`` 时以 ``formats`` 为准。
+        font_family: 请求的字体族。**仅当该字体确实安装在系统中**时才置于字体链
+            首位并真实生效；否则保持内置字体链不变，并记录一条警告。
+        font_size_pt: 基础字号（磅），真实生效于轴标签/刻度/图例；标题相对 +2。
+            必须为正整数。
 
     返回：
         FigureBundle，包含全部已生成图件的元数据与跳过原因（warnings）。
         对无法构建的图件（常量列、组数不足等）仅记录警告，不抛异常；绝不会在
         存在可用信息的情况下静默跳过。
+
+    诚实性约定：**任何无法真实生效的样式键都会进入 ``warnings``**，而不是被
+    悄悄吞掉——"看起来配置了其实没生效"正是本仓库反复清理的一类 bug。
     """
+    # ``formats=None`` 表示调用方未显式指定，改用 ``default_format``。既有默认
+    # ``default_format="png"`` 因此给出 ``("png",)``，与改动前逐字节一致。
+    if formats is None:
+        formats = (default_format,) if default_format else ("png",)
+    if not formats:
+        formats = ("png",)
+    formats = _normalise_formats(formats)
     if not formats:
         formats = ("png",)
 
     frame = _load_frame(path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    _configure_style()
+    bundle = FigureBundle()
+
+    if not _is_known_palette(palette):
+        bundle.warnings.append(
+            f"配色方案「{palette}」未注册，已回退到默认 Okabe-Ito 配色。"
+        )
     colors = _resolve_palette(palette)
+
+    _, font_family_applied = _configure_style(
+        font_family=font_family, font_size_pt=font_size_pt
+    )
+    if font_family and not font_family_applied:
+        bundle.warnings.append(
+            f"字体族「{font_family}」在当前系统中不可用，已沿用内置字体链（中文字形不受影响）。"
+        )
+
+    if default_journal:
+        bundle.warnings.append(
+            f"figures.default_journal「{default_journal}」当前未接入绘图逻辑"
+            "（本绘图后端不支持按期刊推导样式），已忽略。"
+        )
 
     numeric_columns = _numeric_columns(frame)
 
-    bundle = FigureBundle()
     if not numeric_columns:
         bundle.warnings.append("数据集中没有可用的数值列，未生成任何图件")
 

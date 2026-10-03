@@ -130,5 +130,11 @@ class SearchReport:
     deduplicated_count: int = 0
     #: 因总量上限（``max_results``）被裁掉的条数。
     dropped_by_limit: int = 0
+    #: 因**年份范围**（``search.year_range``）被排除的条数。
+    #:
+    #: 与 :attr:`dropped_by_limit` 同一原则：排除**绝不静默**。计数只统计
+    #: **年份已知且落在范围外**的文献；``year`` 为 ``None`` 的文献**不**计入，
+    #: 它们被保留（宁可多留也不因缺失元数据而丢弃证据）。
+    excluded_by_year: int = 0
     #: 人类可读的排序依据，用于如实报告"找到了多少、留下了多少、为什么"。
     ranking_reasons: list[str] = field(default_factory=list)

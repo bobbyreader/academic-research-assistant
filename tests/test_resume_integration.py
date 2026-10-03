@@ -54,7 +54,13 @@ class CountingSearcher:
         self.search_calls = 0
         self.queries: list[str] = []
 
-    def search(self, query: str, sources: list[str], max_results: int) -> SearchReport:
+    def search(
+        self,
+        query: str,
+        sources: list[str],
+        max_results: int,
+        year_range: tuple[int, int] | list[int] | None = None,
+    ) -> SearchReport:
         self.search_calls += 1
         self.queries.append(query)
         return SearchReport(

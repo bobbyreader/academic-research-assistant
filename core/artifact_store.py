@@ -2,10 +2,70 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from core.config_loader import get_str
+
+
+def resolve_repo_path(anchor: Path, configured: str) -> Path:
+    """把配置里的路径解析为绝对路径（**唯一入口**，不在各调用点重写）。
+
+    解析规则（冻结）：
+    * **相对路径** → 相对 ``anchor`` 解析；
+    * **绝对路径** → 原样使用（不做任何拼接）。
+
+    所有从 ``paths.*`` 读取的路径都必须经过这里，以保证"配置怎么改、解析就怎么
+    一致"，避免每个调用点各写一份而彼此漂移。``anchor`` 的选择见 ``resolve_paths``
+    （工作区数据锚定运行根，代码资产锚定源码根）。
+    """
+    candidate = Path(configured)
+    if candidate.is_absolute():
+        return candidate
+    return anchor / candidate
+
+
+#: ``paths.*`` 中属于**工作区数据**的键：相对仓库根（运行根 ``base_dir``）解析。
+_WORKSPACE_PATH_KEYS: tuple[str, ...] = ("projects_dir", "output_dir")
+#: ``paths.*`` 中属于**应用自带资产**的键：相对**源码根**解析。该目录随应用代码
+#: 分发（``scripts/``），不随运行根改变——因此不能用 ``base_dir`` 作锚点，否则在
+#: 不把资产复制过去的运行根（例如测试的临时目录）下会解析到不存在的位置。未配置
+#: 时回退 DEFAULTS，与原硬编码锚点一致。
+#
+#: 注意：``templates_dir`` 已按"只保留当前有代码读取的键"的准入规则移除——全项目
+#: 无任何消费者（``templates/*.md`` 是零引用的模板文件），提供该键只会让用户以为
+#: 可配置。配置侧的移除由 config-dev 同步完成。
+_ASSET_PATH_KEYS: tuple[str, ...] = ("scripts_dir",)
+
+
+def resolve_paths(
+    base_dir: Path,
+    settings: Mapping[str, Any],
+    *,
+    source_root: Path | None = None,
+) -> dict[str, Path]:
+    """从 ``paths.*`` 节解析全部路径，返回 ``{叶子键名: 绝对 Path}``。
+
+    * 工作区路径（``projects_dir`` / ``output_dir``）相对 ``base_dir``（仓库/运行根）；
+    * 应用资产路径（``scripts_dir``）相对 ``source_root``（源码根，默认 ``core/`` 的
+      父目录 = 仓库根），因为它们随代码分发。
+
+    未配置时逐项回退到 ``DEFAULTS``（由 ``get_str`` 保证），因此**空 settings** 下
+    解析结果与引入本机制之前逐字节一致（``projects``/``output`` 相对运行根，
+    ``scripts`` 相对仓库根）。
+    """
+    asset_root = (
+        source_root if source_root is not None else Path(__file__).resolve().parent.parent
+    )
+    resolved: dict[str, Path] = {}
+    for key in _WORKSPACE_PATH_KEYS:
+        resolved[key] = resolve_repo_path(base_dir, get_str(settings, f"paths.{key}"))
+    for key in _ASSET_PATH_KEYS:
+        resolved[key] = resolve_repo_path(asset_root, get_str(settings, f"paths.{key}"))
+    return resolved
 
 
 @dataclass

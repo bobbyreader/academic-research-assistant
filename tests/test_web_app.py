@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import json
+import logging
 import threading
 import time
 from pathlib import Path
 from typing import ClassVar
 
+import pytest
+
+from core.artifact_store import ArtifactStore, resolve_paths
+from core.config_loader import DEFAULTS
+from core.config_validation import ConfigValidationError
 from core.research_pipeline import ResearchPipelineCancelled
-from orchestrator import Orchestrator
+from core.research_service import ResearchService
+from core.state_manager import ProjectState, StateManager, WorkflowStage
+from orchestrator import Orchestrator, configure_logging
 from web_app import DEFAULT_WEB_PORT, QUEUE_POSITION_RUNNING, create_app
 
 
@@ -790,4 +799,646 @@ def test_usage_note_reaches_the_snapshot_verbatim(tmp_path: Path) -> None:
     joined = "\n".join(snapshot["logs"])
     assert "1 次未获得用量" in joined, (
         "the log must carry the honest 'not reported' wording, not a fabricated cost"
+    )
+
+
+# ==========================================================================
+# Phase 8: paths.* / logging.* / 配置接线枢纽
+# ==========================================================================
+
+
+def _write_settings(base_dir: Path, body: str) -> None:
+    config_dir = base_dir / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "settings.yaml").write_text(body, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# paths.* 锚点语义
+# ---------------------------------------------------------------------------
+def test_paths_projects_dir_follows_base_dir_but_scripts_dir_follows_repo_root(
+    tmp_path: Path,
+) -> None:
+    """`projects_dir` 跟随运行根；`scripts_dir` 锚定仓库根（代码资产随代码走）。
+
+    这条测试钉死"双锚点"语义：用户数据（projects/output）跟随 base_dir，代码资产
+    （scripts/templates）必须无论从哪个 cwd 启动都能找到，因此锚定代码位置。
+    """
+    orchestrator = Orchestrator(tmp_path)
+
+    assert orchestrator.projects_dir == tmp_path / "projects", (
+        "projects_dir 必须跟随运行根（否则既有 e2e 断言与 web 注入会破裂）"
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+    assert orchestrator.scripts_dir == repo_root / "scripts", (
+        "scripts_dir 必须锚定仓库根，而不是运行根"
+    )
+    assert (orchestrator.scripts_dir / "export_pptx.py").is_file()
+
+
+def test_paths_projects_dir_absolute_is_used_as_is(tmp_path: Path) -> None:
+    """绝对路径一律原样使用，不受锚点影响。"""
+    absolute = tmp_path / "custom_projects"
+    settings = {"paths": {"projects_dir": str(absolute)}}
+
+    resolved = resolve_paths(tmp_path / "unused", settings)
+
+    assert resolved["projects_dir"] == absolute
+
+
+def test_configured_projects_dir_receives_the_artifacts(tmp_path: Path) -> None:
+    """把 `paths.projects_dir` 指到临时目录后，产物**确实落在那里**（端到端）。
+
+    这是 `paths.*` 真实生效的证据：只断言解析函数不够，必须在真实链路上看到
+    产物写进配置指定的目录。
+    """
+    custom = tmp_path / "custom_store"
+    _write_settings(
+        tmp_path,
+        f"paths:\n  projects_dir: {json.dumps(str(custom))}\n",
+    )
+
+    orchestrator = Orchestrator(tmp_path)
+    assert orchestrator.projects_dir == custom
+
+    # 走真实 Orchestrator→StateManager/ArtifactStore 落盘一个产物。
+    orchestrator.init_project("moved", "hybrid")
+    store = ArtifactStore(orchestrator.projects_dir)
+    saved = store.save_artifact("moved", "search", "literal.txt", "hello")
+
+    assert saved.is_file()
+    assert custom in saved.parents, "产物必须落在配置指定的 projects_dir 下"
+    assert (custom / "moved" / "artifacts" / "search").is_dir()
+
+
+# ---------------------------------------------------------------------------
+# logging.*
+# ---------------------------------------------------------------------------
+def test_logging_section_sets_level_and_file(tmp_path: Path) -> None:
+    """`logging.*` 生效：级别与格式可断言，文件输出写到指定路径。"""
+    log_file = tmp_path / "logs" / "run.log"
+    _write_settings(
+        tmp_path,
+        "logging:\n"
+        "  level: DEBUG\n"
+        "  format: '%(levelname)s|%(name)s|%(message)s'\n"
+        f"  file: {json.dumps(str(log_file))}\n",
+    )
+
+    configure_logging(tmp_path)
+    root = logging.getLogger()
+    try:
+        assert root.level == logging.DEBUG, "logging.level 必须生效"
+        logger = logging.getLogger("phase8.probe")
+        logger.debug("probe-message")
+        for handler in root.handlers:
+            handler.flush()
+        assert log_file.is_file(), "logging.file 必须创建文件处理器并写入"
+        content = log_file.read_text(encoding="utf-8")
+        assert "DEBUG|phase8.probe|probe-message" in content, (
+            "logging.format 必须生效（含级别|logger 名|消息）"
+        )
+    finally:
+        for handler in list(root.handlers):
+            handler.close()
+            root.removeHandler(handler)
+        logging.getLogger().setLevel(logging.WARNING)
+
+
+def test_logging_unconfigured_defaults_to_info(tmp_path: Path) -> None:
+    """未配置时日志级别回退到 DEFAULTS 的 INFO（不改变既有日志行为）。"""
+    configure_logging(tmp_path)
+    root = logging.getLogger()
+    try:
+        assert root.level == logging.INFO
+    finally:
+        for handler in list(root.handlers):
+            handler.close()
+            root.removeHandler(handler)
+        logging.getLogger().setLevel(logging.WARNING)
+
+
+# ---------------------------------------------------------------------------
+# 配置校验：快速失败 + 警告可见
+# ---------------------------------------------------------------------------
+def test_invalid_config_still_fails_fast_and_names_the_key(tmp_path: Path) -> None:
+    """配置非法 → 抛 ConfigValidationError，且消息点名叫错的键。"""
+    _write_settings(tmp_path, "review:\n  reviewer_count: three\n")
+    projects_dir = tmp_path / "projects"
+    state_manager = StateManager(projects_dir)
+    state_manager.save(
+        ProjectState(
+            name="badcfg", mode="hybrid", current_stage=WorkflowStage.BRAINSTORMING
+        )
+    )
+
+    with pytest.raises(ConfigValidationError, match="reviewer_count"):
+        ResearchService(
+            projects_dir, state_manager, ArtifactStore(projects_dir)
+        ).run("badcfg", "a topic", sources=["crossref"], max_results=1)
+
+
+def test_config_warnings_are_visible_in_the_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`validation.warnings` 必须可见（进日志），不得被静默吞掉。"""
+    # 未知顶层键会产生 warning（非 error）。
+    _write_settings(tmp_path, "unexpected_section:\n  foo: 1\n")
+    projects_dir = tmp_path / "projects"
+    state_manager = StateManager(projects_dir)
+    state_manager.save(
+        ProjectState(
+            name="warny", mode="hybrid", current_stage=WorkflowStage.BRAINSTORMING
+        )
+    )
+
+    # 会在保存状态后、构造管线前记录警告；随后因缺少外部桩而失败——这里只关心
+    # 警告已记录，故吞掉运行期异常。
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(Exception),  # noqa: B017 - 运行不关心后续是否失败
+    ):
+        ResearchService(
+            projects_dir, state_manager, ArtifactStore(projects_dir)
+        ).run("warny", "a topic", sources=["crossref"], max_results=1)
+
+    assert any("配置警告" in record.message for record in caplog.records), (
+        "配置警告必须进入日志，绝不能静默"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 续跑指纹：未配置时与改动前一致（尤其 consensus_threshold 必须是 0.6，不是 0）
+# ---------------------------------------------------------------------------
+def test_fingerprint_defaults_include_float_consensus_threshold(tmp_path: Path) -> None:
+    """未配置时，指纹里的 `review_consensus_threshold` 必须是 0.6（不是被 get_int 抹成的 0）。
+
+    这是 `get_float` 修复的核心证据：直接断言**指纹字段值**，而不是只看读取代码。
+    """
+    state_manager = StateManager(tmp_path / "projects")
+    state_manager.save(
+        ProjectState(
+            name="fp", mode="hybrid", current_stage=WorkflowStage.BRAINSTORMING
+        )
+    )
+    service = ResearchService(
+        tmp_path / "projects", state_manager, ArtifactStore(tmp_path / "projects")
+    )
+
+    captured: dict[str, object] = {}
+
+    import core.research_service as rs
+
+    real_build = rs.RunFingerprint.build
+
+    def spy_build(**kwargs: object):
+        captured.update(kwargs)
+        return real_build(**kwargs)
+
+    original = rs.RunFingerprint.build
+    rs.RunFingerprint.build = staticmethod(spy_build)  # type: ignore[assignment]
+    try:
+        with pytest.raises(Exception):  # noqa: B017 - 管线后续会因缺少桩而失败
+            service.run("fp", "a topic", sources=["crossref"], max_results=1)
+    finally:
+        rs.RunFingerprint.build = original  # type: ignore[assignment]
+
+    # 引用 DEFAULTS 而非字面量：默认值再调整时测试自动跟随，不会出现"默认值改了、
+    # 测试没跟上"的假红/假绿。spy 包住 RunFingerprint.build，断言的是**指纹字段的
+    # 实际值**，不是读取代码。
+    assert captured["review_consensus_threshold"] == pytest.approx(
+        float(DEFAULTS["review.consensus_threshold"])
+    )
+    # float 语义：即便默认值是整数型 0.0，也必须以 float 传入（get_float 保证）。
+    assert isinstance(captured["review_consensus_threshold"], float)
+    assert captured["writing_language"] == DEFAULTS["writing.default_language"]
+    assert captured["search_year_range"] == tuple(DEFAULTS["search.year_range"])  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# 核心证据：只改一项配置 → writing 不再被复用，且原因点名"撰写语言"
+# ---------------------------------------------------------------------------
+class _Phase8Searcher:
+    """最小检索桩：每次调用都返回同一篇文献。
+
+    接受 ``year_range`` 关键字（Phase 8 检索层新增参数），以免因下游签名演进而
+    使本测试假阳性失败。
+    """
+
+    def search(
+        self,
+        query: str,
+        sources: list[str],
+        max_results: int,
+        **kwargs: object,
+    ):
+        from core.external_clients import PaperRecord, SearchReport
+
+        return SearchReport(
+            papers=[
+                PaperRecord(
+                    title="Evidence",
+                    authors=["A Author"],
+                    year=2024,
+                    journal="J",
+                    doi="10.1234/x",
+                    abstract="A finding.",
+                    source="crossref",
+                )
+            ],
+            errors=[],
+            sources_attempted=list(sources),
+            counts_by_source={name: 1 for name in sources},
+        )
+
+
+class _Phase8LLM:
+    """最小模型桩：满足分析 / 论断核验 / 写作 / 评审四个关口。"""
+
+    def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+        if "事实核查员" in system_prompt:
+            return {
+                "verdicts": [
+                    {
+                        "claim_index": 0,
+                        "claim": "Finding holds",
+                        "citation_id": "P1",
+                        "verdict": "supports",
+                        "quote": "A finding.",
+                        "rationale": "ok",
+                    }
+                ]
+            }
+        if "审稿人" in system_prompt:
+            return {
+                "summary": "ok",
+                "strengths": ["clear"],
+                "concerns": [
+                    {
+                        "category": "methodology",
+                        "severity": "minor",
+                        "statement": "small n",
+                        "evidence": "x",
+                    }
+                ],
+                "recommendation": "minor_revision",
+                "score": 60,
+            }
+        return {
+            "research_question": "q",
+            "key_findings": [{"claim": "Finding holds", "citation_ids": ["P1"]}],
+            "research_gaps": ["more"],
+            "proposed_methods": ["cohort"],
+        }
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        return "# Draft\n\nFinding holds [P1].\n"
+
+
+class _Phase8Resolver:
+    def resolve(self, doi: str) -> tuple[bool, str | None]:
+        return True, None
+
+
+def _phase8_run(orchestrator: Orchestrator, project: str) -> object:
+    return orchestrator.run_real_research(
+        project,
+        "a topic",
+        sources=["crossref"],
+        max_results=2,
+    )
+
+
+def test_changing_writing_language_invalidates_the_writing_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**本阶段核心证据**：只改 `writing.default_language` → 重跑 → writing 不再复用。
+
+    若新配置不进指纹，用户改了撰写语言后系统会复用旧语言产出的手稿，却报告
+    "复用了全部阶段"——那是一句谎。这条测试确保 `writing.*` 真的参与续跑判定，
+    且 `resume_plan` 的原因里点名"撰写语言"。
+    """
+    monkeypatch.setattr(
+        "core.research_service.LiteratureSearcher.from_config",
+        lambda **kwargs: _Phase8Searcher(),
+    )
+    monkeypatch.setattr(
+        "core.research_service.build_llm_client", lambda **kwargs: _Phase8LLM()
+    )
+    monkeypatch.setattr("core.citation_verifier.CrossrefDoiResolver", _Phase8Resolver)
+
+    # 首跑：默认配置（语言 zh）。
+    _write_settings(tmp_path, "writing:\n  default_language: zh\n")
+    orchestrator = Orchestrator(tmp_path)
+    orchestrator.init_project("lang", "hybrid")
+    first = _phase8_run(orchestrator, "lang")
+    assert first.reused_steps == [], "首跑不应复用任何阶段"
+
+    # 只改一项：撰写语言 zh -> en。
+    _write_settings(tmp_path, "writing:\n  default_language: en\n")
+    second = _phase8_run(orchestrator, "lang")
+
+    assert "writing" not in second.reused_steps, (
+        "改了撰写语言后 writing 必须重新执行，绝不能复用旧语言的手稿"
+    )
+    assert "review" not in second.reused_steps, (
+        "writing 不可复用 ⇒ 其后阶段（review）也不可复用（前缀性）"
+    )
+    # search 的输入未变，仍可复用——证明这条不是"什么都不复用"的假阳性。
+    assert "search" in second.reused_steps, (
+        "仅改撰写语言不应让检索阶段重跑（否则每年都要重新联网检索）"
+    )
+    assert "撰写语言" in second.resume_plan, (
+        "续跑判定必须点名变化的输入（撰写语言），否则用户不知道为何没复用"
+    )
+
+
+def test_scripts_dir_asset_resolves_and_pptx_export_succeeds(tmp_path: Path) -> None:
+    """`Orchestrator(tmp_path)` 下 `scripts_dir` 指向仓库根，且 pptx 导出成功。
+
+    钉死"代码资产锚定仓库根"：即使运行根是临时目录，`scripts/export_pptx.py`
+    仍能被找到，导出为合法 zip（`PK` 开头）。
+    """
+    orchestrator = Orchestrator(tmp_path)
+    repo_root = Path(__file__).resolve().parents[1]
+    assert orchestrator.scripts_dir == repo_root / "scripts"
+
+    state_manager = orchestrator.state_manager
+    state_manager.save(
+        ProjectState(
+            name="deck", mode="hybrid", current_stage=WorkflowStage.WRITING
+        )
+    )
+    orchestrator.artifact_store.save_artifact(
+        "deck",
+        "writing",
+        "manuscript.md",
+        "# Title\n\n- point one\n- point two\n",
+    )
+
+    out = orchestrator.export("deck", "pptx")
+
+    assert out.read_bytes()[:2] == b"PK", "pptx 必须是合法 zip 容器"
+
+
+# ==========================================================================
+# search.* 真实生效：配置作默认值，命令行显式参数优先
+# ==========================================================================
+def _capture_cli_research(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+) -> dict[str, object]:
+    """驱动 CLI `main()`，捕获传给 run_real_research 的 sources / max_results。
+
+    通过替换 `Orchestrator.run_real_research` 捕获参数并直接返回一个假结果，
+    避免真正联网检索；其余（参数解析、settings 读取、项目初始化）走真实代码。
+    """
+    import orchestrator as orch_module
+
+    captured: dict[str, object] = {}
+
+    class _Result:
+        reused_steps: ClassVar[list[str]] = []
+        resume_plan: ClassVar[str] = ""
+        resume_note: ClassVar[str] = ""
+        usage_note: ClassVar[str] = ""
+
+    def fake_run(self, project_name, topic, **options):  # type: ignore[no-untyped-def]
+        captured["sources"] = options.get("sources")
+        captured["max_results"] = options.get("max_results")
+        return _Result()
+
+    monkeypatch.setattr(orch_module.Orchestrator, "run_real_research", fake_run)
+    monkeypatch.setattr(
+        orch_module.Orchestrator, "export", lambda self, *a, **k: Path("x")
+    )
+    monkeypatch.setattr(orch_module.Orchestrator, "report_resume", lambda self, r: None)
+    monkeypatch.setattr(orch_module.Orchestrator, "report_usage", lambda self, r: None)
+    monkeypatch.setattr(
+        orch_module.Orchestrator, "report_literature_limit", lambda self, n: None
+    )
+    monkeypatch.setattr("sys.argv", ["orchestrator.py", *argv])
+    orch_module.main()
+    return captured
+
+
+def test_cli_sources_fall_back_to_config_when_not_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """配置 `search.default_sources: [pubmed]` 且 CLI 不传 `--sources` → 只检索 pubmed。
+
+    这是 `search.default_sources` 真实生效的证据（此前是死配置）。
+    """
+    _write_settings(tmp_path, "search:\n  default_sources: [pubmed]\n")
+
+    captured = _capture_cli_research(
+        tmp_path,
+        monkeypatch,
+        ["--base-dir", str(tmp_path), "research", "cli_job", "--topic", "a topic"],
+    )
+
+    assert captured["sources"] == ["pubmed"], (
+        "未传 --sources 时必须回退到配置的 search.default_sources"
+    )
+
+
+def test_cli_max_results_falls_back_to_config_when_not_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """配置 `search.max_results: 7` 且 CLI 不传 `--max-results` → 用 7。"""
+    _write_settings(tmp_path, "search:\n  max_results: 7\n")
+
+    captured = _capture_cli_research(
+        tmp_path,
+        monkeypatch,
+        ["--base-dir", str(tmp_path), "research", "cli_job", "--topic", "a topic"],
+    )
+
+    assert captured["max_results"] == 7
+
+
+def test_cli_explicit_sources_override_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CLI 显式传 `--sources` 时**覆盖**配置（显式参数优先）。
+
+    `--max-results` 同理：显式值胜过配置。
+    """
+    _write_settings(
+        tmp_path,
+        "search:\n  default_sources: [pubmed]\n  max_results: 7\n",
+    )
+
+    captured = _capture_cli_research(
+        tmp_path,
+        monkeypatch,
+        [
+            "--base-dir",
+            str(tmp_path),
+            "research",
+            "cli_job",
+            "--topic",
+            "a topic",
+            "--sources",
+            "crossref,arxiv",
+            "--max-results",
+            "3",
+        ],
+    )
+
+    assert captured["sources"] == ["crossref", "arxiv"], (
+        "显式 --sources 必须覆盖配置默认值"
+    )
+    assert captured["max_results"] == 3, "显式 --max-results 必须覆盖配置默认值"
+
+
+def test_web_research_falls_back_to_config_sources(tmp_path: Path) -> None:
+    """Web 未传 sources 时回退到配置 `search.default_sources`（与 CLI 一致）。"""
+    _write_settings(tmp_path, "search:\n  default_sources: [pubmed]\n")
+    captured: dict[str, object] = {}
+
+    class FakeRunner:
+        def __init__(self, base_dir: Path) -> None:
+            self.delegate = Orchestrator(base_dir)
+
+        @property
+        def state_manager(self):  # type: ignore[no-untyped-def]
+            return self.delegate.state_manager
+
+        def init_project(self, name: str, mode: str) -> None:
+            self.delegate.init_project(name, mode)
+
+        def run_real_research(self, project_name: str, topic: str, **options: object) -> None:
+            captured.update(options)
+
+        def export(self, project_name: str, format: str) -> Path:
+            output = self.delegate.base_dir / "projects" / project_name / "exports" / f"{project_name}_final.{format}"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("x", encoding="utf-8")
+            return output
+
+    client = create_app(tmp_path, orchestrator_factory=FakeRunner).test_client()
+    response = client.post(
+        "/api/research",
+        json={"topic": "A useful topic", "project_name": "cfg_job", "exports": ["md"]},
+    )
+
+    assert response.status_code == 202
+    job_id = response.get_json()["job_id"]
+    # 任务在后台线程执行，轮询到终态后再断言 captured。
+    for _ in range(25):
+        if client.get(f"/api/jobs/{job_id}").get_json()["status"] in {
+            "completed",
+            "failed",
+        }:
+            break
+        time.sleep(0.02)
+
+    # 未显式提供 sources → 配置默认值被送达 runner。
+    assert captured["sources"] == ["pubmed"], (
+        "Web 未传 sources 时必须回退到配置的 search.default_sources"
+    )
+
+
+# ==========================================================================
+# citation.export_formats 真实生效（导出白名单，本阶段最后一个未读取键）
+# ==========================================================================
+def test_export_whitelist_blocks_format_outside_citation_export_formats(
+    tmp_path: Path,
+) -> None:
+    """`citation.export_formats: [md]` 时请求 pdf → 抛错且点名叫出该配置。
+
+    这是 `citation.export_formats` 真实生效的证据（此前是死配置）。
+    """
+    from core.export_service import ExportError
+
+    _write_settings(tmp_path, "citation:\n  export_formats: [md]\n")
+    orchestrator = Orchestrator(tmp_path)
+    orchestrator.state_manager.save(
+        ProjectState(name="wl", mode="hybrid", current_stage=WorkflowStage.WRITING)
+    )
+    orchestrator.artifact_store.save_artifact(
+        "wl", "writing", "manuscript.md", "# Title\n\n- point\n"
+    )
+
+    # 白名单内的格式正常导出。
+    md_out = orchestrator.export("wl", "md")
+    assert md_out.is_file()
+
+    # 白名单外的格式被拒绝，且消息点名配置键。
+    with pytest.raises(ExportError) as excinfo:
+        orchestrator.export("wl", "pdf")
+    assert "citation.export_formats" in str(excinfo.value)
+
+
+def test_export_default_format_from_config_applies_when_unspecified(
+    tmp_path: Path,
+) -> None:
+    """`export.default_format: pptx` 且未显式指定格式 → 用 pptx。"""
+    _write_settings(tmp_path, "citation:\n  export_formats: [md, pdf, pptx]\nexport:\n  default_format: pptx\n")
+    orchestrator = Orchestrator(tmp_path)
+    orchestrator.state_manager.save(
+        ProjectState(name="df", mode="hybrid", current_stage=WorkflowStage.WRITING)
+    )
+    orchestrator.artifact_store.save_artifact(
+        "df", "writing", "manuscript.md", "# Title\n\n- point\n"
+    )
+
+    out = orchestrator.export("df")
+
+    assert out.name == "df_final.pptx", (
+        "未显式指定格式时必须回退到配置的 export.default_format"
+    )
+    assert out.read_bytes()[:2] == b"PK"
+
+
+def test_web_export_respects_citation_export_formats_whitelist(tmp_path: Path) -> None:
+    """Web 请求白名单外的导出格式时，该格式被过滤掉（不生成下载项）。"""
+    _write_settings(tmp_path, "citation:\n  export_formats: [md]\n")
+    captured: dict[str, object] = {}
+
+    class FakeRunner:
+        def __init__(self, base_dir: Path) -> None:
+            self.delegate = Orchestrator(base_dir)
+
+        @property
+        def state_manager(self):  # type: ignore[no-untyped-def]
+            return self.delegate.state_manager
+
+        def init_project(self, name: str, mode: str) -> None:
+            self.delegate.init_project(name, mode)
+
+        def run_real_research(self, project_name: str, topic: str, **options: object) -> None:
+            captured.update(options)
+
+        def export(self, project_name: str, format: str) -> Path:
+            captured.setdefault("exported", []).append(format)  # type: ignore[union-attr]
+            output = self.delegate.base_dir / "projects" / project_name / "exports" / f"{project_name}_final.{format}"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text("x", encoding="utf-8")
+            return output
+
+    client = create_app(tmp_path, orchestrator_factory=FakeRunner).test_client()
+    response = client.post(
+        "/api/research",
+        json={
+            "topic": "A useful topic",
+            "project_name": "wl_job",
+            "sources": ["crossref"],
+            "exports": ["md", "pdf"],
+        },
+    )
+    assert response.status_code == 202
+    job_id = response.get_json()["job_id"]
+    for _ in range(25):
+        if client.get(f"/api/jobs/{job_id}").get_json()["status"] in {
+            "completed",
+            "failed",
+        }:
+            break
+        time.sleep(0.02)
+
+    assert captured.get("exported") == ["md"], (
+        "白名单只含 md 时，pdf 必须被过滤掉，绝不能导出"
     )

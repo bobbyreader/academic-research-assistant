@@ -180,6 +180,9 @@ class PeerReviewBundle:
     decision: str = _DEFAULT_RECOMMENDATION
     author_checks: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    #: 评分刻度（如 "0-100" / "0-10"）。空串 ⇒ 沿用历史行为的 "0-100" 标注，
+    #: 保证缺省时 Markdown 产物逐字节一致。
+    score_scale: str = ""
 
     def to_dict(self) -> dict[str, object]:
         """返回可序列化的字典。"""
@@ -189,13 +192,19 @@ class PeerReviewBundle:
             "reports": [report.to_dict() for report in self.reports],
             "author_checks": list(self.author_checks),
             "warnings": list(self.warnings),
+            "score_scale": self.score_scale,
         }
 
     @classmethod
     def from_dict(cls, payload: object) -> PeerReviewBundle:
-        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。"""
+        """从 :meth:`to_dict` 的输出还原；结构不合法时抛 ``ValueError``。
+
+        ``score_scale`` 是后加的**可选**字段：为兼容改动前写下的旧产物，缺失时
+        回退为空串（即历史行为），不视为结构非法。
+        """
         data = _require_object(payload, cls.__name__)
         reports_payload = _require_list(data, "reports", cls.__name__)
+        raw_scale = data.get("score_scale", "")
         return cls(
             reports=[
                 _decode_nested(item, ReviewerReport, "reports", cls.__name__)
@@ -205,10 +214,12 @@ class PeerReviewBundle:
             decision=_require_str(data, "decision", cls.__name__),
             author_checks=_require_str_list(data, "author_checks", cls.__name__),
             warnings=_require_str_list(data, "warnings", cls.__name__),
+            score_scale=raw_scale if isinstance(raw_scale, str) else "",
         )
 
     def to_markdown(self) -> str:
         """渲染为人类可读的 Markdown 评审报告。"""
+        scale = _score_scale_upper(self.score_scale)
         lines = [
             "# 预提交同行评审报告（模拟）",
             "",
@@ -227,7 +238,7 @@ class PeerReviewBundle:
                     f"## 审稿人：{report.reviewer_role}",
                     "",
                     f"- 建议: {report.recommendation}",
-                    f"- 评分: {report.score}/100",
+                    f"- 评分: {report.score}/{scale}",
                     "",
                     report.summary or "（无摘要）",
                     "",
@@ -540,14 +551,21 @@ def _build_user_prompt(
     statistics_verification: dict[str, Any],
     statistics_report: dict[str, Any],
     claim_verification: dict[str, Any],
+    include_devil_advocate: bool = False,
+    score_scale: str = "",
 ) -> str:
-    """为指定审稿角色构建用户提示词，重点要求逐字证据与追溯交叉核对。"""
+    """为指定审稿角色构建用户提示词，重点要求逐字证据与追溯交叉核对。
+
+    ``include_devil_advocate`` / ``score_scale`` 在此参数化；两者缺省时输出与
+    改动前逐字节一致。
+    """
     focus = {
         "methodology": "重点审查研究设计、变量操作化、样本与可重复性。",
         "statistics": "重点审查统计方法的恰当性、多重比较与效应量报告。",
         "novelty": "重点审查研究贡献、与已有文献的差异与表述原创性。",
     }.get(role, "请给出全面的学术评审意见。")
 
+    scale = score_scale.strip() or "0-100"
     output_schema = (
         "{\n"
         '  "summary": "对该稿件的总体判断，需明确指出不确定性",\n'
@@ -561,8 +579,17 @@ def _build_user_prompt(
         "    }\n"
         "  ],\n"
         '  "recommendation": "accept|minor_revision|major_revision|reject",\n'
-        '  "score": 0-100\n'
+        f'  "score": {scale}\n'
         "}"
+    )
+
+    # 缺省路径（include_devil_advocate=False）不追加任何文本，保证逐字节一致。
+    devil_instruction = (
+        "此外，你必须**明确提出一条反对意见（devil's advocate）**："
+        "主动挑战稿件最核心的结论或方法假设，指出其可能错误的理由，"
+        "并把它作为一条 severity 为 major 的 concern 提出（evidence 仍须逐字引用稿件）。\n\n"
+        if include_devil_advocate
+        else ""
     )
 
     return (
@@ -579,7 +606,8 @@ def _build_user_prompt(
         f"{_compact(statistics_report)}\n\n"
         "=== 论断—证据核验结果 ===\n"
         f"{_compact(claim_verification)}\n\n"
-        "请交叉核对上述追溯结果："
+        + devil_instruction
+        + "请交叉核对上述追溯结果："
         "如果存在无法追溯的引用（unknown_markers 非空）、"
         "无法追溯的统计陈述（unmatched_count > 0）、"
         "或未被其引用文献支持的论断（unsupported_count > 0），必须作为 concern 提出。\n\n"
@@ -643,6 +671,52 @@ def _build_synthesis(reports: Sequence[ReviewerReport], decision: str) -> str:
         "其中追溯类问题（无法追溯的引用/统计陈述）由系统确定性注入，"
         "对每位审稿人内容相同，故按独立问题计一次。"
         f"按最坏情况优先的机械规则，综合决定为 {decision}。"
+    )
+
+
+def _score_scale_upper(score_scale: str) -> str:
+    """把评分刻度还原成"分母"显示文本。
+
+    ``"0-100"`` → ``"100"``、``"0-10"`` → ``"10"``；空串 → ``"100"``（历史行为）。
+    无法识别为 ``a-b`` 形态时原样返回（例如 ``"百分制"``），绝不臆造数字。
+    """
+    text = score_scale.strip()
+    if not text:
+        return "100"
+    if "-" in text:
+        upper = text.rsplit("-", 1)[-1].strip()
+        if upper:
+            return upper
+    return text
+
+
+def _consensus_note(
+    reports: Sequence[ReviewerReport], threshold: float
+) -> str:
+    """按一致度阈值判断评审意见是否分歧，并在分歧时给出明确标注。
+
+    一致度定义为：**占比最高的建议**所占审稿人比例（票数/有效审稿人数）。
+    ``threshold <= 0``（缺省）时永远返回空串——一致度天然 ≥ 0，绝不可能低于 0，
+    因此缺省不产生任何新增文本，产物与改动前逐字节一致。
+
+    当 ``threshold > 0`` 且一致度 **低于** 阈值时，返回一句显式说明，供综合意见
+    前置，使"评审意见分歧"对读者可见，而不是被一个机械的最终决定掩盖。
+    """
+    if threshold <= 0 or not reports:
+        return ""
+    recommendations = [report.recommendation for report in reports]
+    valid = [item for item in recommendations if item in RECOMMENDATIONS]
+    if not valid:
+        return ""
+    total = len(valid)
+    best_count = max(valid.count(item) for item in set(valid))
+    agreement = best_count / total
+    if agreement >= threshold:
+        return ""
+    return (
+        f"⚠️ 评审意见分歧：一致度 {agreement:.2f} 低于阈值 {threshold:.2f}，"
+        f"审稿人建议未达成共识（最高票 {best_count}/{total}）。"
+        "最终决定由机械规则导出，请作者据此谨慎判断，不宜视为集体共识。"
     )
 
 
@@ -745,12 +819,22 @@ def review_manuscript(
     statistics_report: dict | None = None,
     claim_verification: dict | None = None,
     reviewer_count: int = 3,
+    include_devil_advocate: bool = False,
+    consensus_threshold: float = 0.0,
+    score_scale: str = "",
 ) -> PeerReviewBundle:
     """对一份稿件执行证据约束的模拟同行评审。
 
     对 ``REVIEWER_ROLES`` 中前 ``reviewer_count`` 个角色各调用一次
     ``llm_client.complete_json``；单次回复解析失败只记录警告并跳过，
     仅当**全部**审稿人都失败时才抛出 :class:`PeerReviewError`。
+
+    ``include_devil_advocate`` / ``consensus_threshold`` / ``score_scale`` 三个
+    参数缺省时行为与改动前逐字节一致：
+
+    * ``include_devil_advocate=True`` → 在每位审稿人提示词中要求明确的反对意见；
+    * ``consensus_threshold > 0`` → 一致度低于阈值时在综合意见前置"评审意见分歧"说明；
+    * ``score_scale`` 非空 → 提示词与 Markdown 中的评分刻度按该值标注。
 
     Returns:
         一个 :class:`PeerReviewBundle`，其中的 decision 由
@@ -777,6 +861,8 @@ def review_manuscript(
             statistics_verification=statistics,
             statistics_report=stats_report,
             claim_verification=claims,
+            include_devil_advocate=include_devil_advocate,
+            score_scale=score_scale,
         )
         try:
             payload = llm_client.complete_json(_SYSTEM_PROMPT, user_prompt)
@@ -809,6 +895,10 @@ def review_manuscript(
 
     decision = _derive_decision([report.recommendation for report in reports])
     synthesis = _build_synthesis(reports, decision)
+    divergence = _consensus_note(reports, consensus_threshold)
+    if divergence:
+        # 分歧说明**前置**于综合意见：先让读者看到"没有共识"，再看机械决定。
+        synthesis = divergence + "\n\n" + synthesis
 
     return PeerReviewBundle(
         reports=reports,
@@ -816,4 +906,5 @@ def review_manuscript(
         decision=decision,
         author_checks=_author_checks(decision),
         warnings=warnings,
+        score_scale=score_scale,
     )

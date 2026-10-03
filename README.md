@@ -266,6 +266,14 @@ CI runs all three on Python 3.11 and 3.12 (see `.github/workflows/ci.yml`).
 `config/settings.yaml` is validated before a run starts and fails fast, naming the
 offending key instead of crashing halfway through.
 
+Every key in that file is **actually read by code**. A key nothing reads would mislead
+you into thinking you can configure something, so `tests/test_config_honesty.py` drives
+the real pipeline and fails if any declared key is never read. Shipped defaults equal the
+pre-existing hard-coded behaviour, so **leaving the file untouched never changes your
+output**. Integrity gates (citation verification, claim-evidence verification) are
+deliberately **not** configurable — they are the product's core promise and cannot be
+switched off. See ROADMAP §7 for what is intentionally absent, and why.
+
 ### 🤝 Contributing
 
 Issues and pull requests are welcome. For major changes, please open an issue first.
@@ -518,6 +526,12 @@ pytest         # 测试
 CI 在 Python 3.11 / 3.12 上执行以上三项（见 `.github/workflows/ci.yml`）。
 `config/settings.yaml` 在运行开始前校验，出错即**快速失败并点名出错的键**，
 而不是跑到一半才崩溃。
+
+该文件里的每个键都**确实被代码读取**。无人读取的键会让用户以为自己能配置某件事，
+因此 `tests/test_config_honesty.py` 会驱动真实管线，一旦发现任何"宣称可配置却从未被
+读取"的键即失败。shipped 默认值等于改动前的硬编码行为，因此**不改这个文件就不会改变
+你的产物**。完整性关口（引用核验、论断—证据核验）**刻意不可配置**——它们是本产品的
+核心承诺，不允许被关闭。哪些键有意缺失及原因见 ROADMAP 第七节。
 
 ### 🤝 贡献指南
 

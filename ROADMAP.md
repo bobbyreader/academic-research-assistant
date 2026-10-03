@@ -381,22 +381,91 @@ worker（开头即返回，不做任何工作）。彻底避免需要可取消�
 
 ---
 
-## 七、计划中的配置项
+## 七、配置项：接回决策与最终语义
 
-`config/settings.yaml` 只保留**当前有代码读取**的键——未被读取的键会误导用户，
-让他们以为自己能配置某件事。以下键已从配置文件中移除，未来的实现方向记录在此，
-而不是留在配置里。
+`config/settings.yaml` 的准入规则：**只保留当前有代码读取的键**——未被读取的键会误导用户，
+让他们以为自己能配置某件事。
 
-| 原键 | 现状 | 重新接回所需的实现 |
+### 7.1 刻意不接回的键（及理由）
+
+**① `integrity.*` —— 刻意不提供开关，永久硬编码。**
+
+`mandatory_stages` / `citation_verification` / `cross_model_check` / `temporal_validation`
+**不会**重新接回。这不是"尚未实现"，而是**安全底线**：
+
+- 本项目的核心承诺是"绝不伪造，硬阻断只留给确定性可验证的错误"；
+- 两个硬阻断关口（引用核验、论断-证据核验）一旦可被配置关闭，用户就能把一份**未经核验**的
+  手稿当作"通过"产出，而系统此后无法再声称任何完整性保证；
+- 因此完整性关口**不接受配置**。需要放松时，正确做法是修正触发它的数据问题，而不是拆掉闸门。
+
+**② `api_keys.scopus_key` / `elsevier_key` —— 需新增检索源，故不接回。**
+
+接回前提是**实现 Scopus / Elsevier 两个新检索源**，而 Phase 7 已决定不新增检索源（每个源都是
+一个新失败面与限流/鉴权面，而实测问题不是"文献太少"）。留在配置里只会"配了却不生效"。
+属于**"功能未到、暂不开放"**，与 ① 的"永不开放"性质不同。
+
+**③ `search.deduplication_fields` —— 不可配置（正确性关键）。**
+
+Phase 7 的去重规则（DOI → 外部 ID → 标题，且标题匹配需旁证）是**正确性关键**而非偏好。
+提供开关等于允许用户让**不同论文被误合并**——与 ① 同一性质。
+
+**④ `search.real_sources` —— 不接回，改为校验源名合法性。**
+
+该布尔量对应不到任何真实的"非真实源"分支（生产路径只有真实网络源），接回就是读而不用的
+假开关。其真实意图改由 `search.default_sources` 的**源名合法性校验**承担。
+
+**⑤ `paths.templates_dir` —— 不接回（当前零消费者）。**
+
+`templates/` 下的模板文件**没有任何生产代码引用**。提供该键就是"宣称可配置、实则无效"。
+要接回它，需先把模板真正用于手稿/回信生成（新功能），故属于**"功能未到、暂不开放"**。
+
+**⑥ `citation.supported_styles` —— 不接回（代码能力事实）。**
+
+"哪些引用样式被支持"是**代码能力事实**，不是用户偏好：用户在配置里写上 `vancouver`
+也变不出该样式的实现。单一事实来源是 `core.citation_styles.known_styles()`，
+`citation.default_style` 的校验直接对照它。
+
+### 7.2 已接回的 8 组（键名已按当前语义诚实化）
+
+| 配置节 | 最终键 | 说明 |
 |---|---|---|
-| `paths.*`（projects_dir / templates_dir / output_dir / scripts_dir） | 未读取；目录由仓库根硬编码解析 | 让 `ArtifactStore`、模板与脚本加载改从该节读取路径，并提供默认值 |
-| `search.*`（default_databases / max_results_per_source / default_year_range / deduplication_fields / real_sources） | 未读取；检索参数由调用方 / 环境变量决定 | 在 `ResearchService`/`LiteratureSearcher` 中接入检索配置，并把 `real_sources` 校验接回 `config_validation` |
-| `citation.*`（default_style / supported_styles / export_formats） | 未读取；引用格式固定 | 实现可选引用样式渲染器，并把样式导出格式接入导出层 |
-| `writing.*`（default_paper_type / default_language / bilingual_abstract / style_guide） | 未读取；写作提示词为固定常量 | 让 `ResearchPipeline` 的写作提示词按这些键参数化 |
-| `integrity.*`（mandatory_stages / citation_verification / cross_model_check / temporal_validation） | 未读取；可信性关口按确定性规则硬编码 | 把关口开关接入管线，并让 `mandatory_stages` 真正决定阻断点 |
-| `export.*`（default_format / pdf_engine / pptx_template / include_speaker_notes） | 未读取；导出参数由 `export_service` 的调用方决定 | 让 `export_service` 从该节读取默认格式与引擎（注意：由 `pdf-dev` 负责该文件） |
-| `logging.*`（level / format / file） | 未读取；日志在入口按库默认配置 | 在应用入口用该节初始化 `logging` |
-| `llm.model` / `llm.base_url` | **保留**（由 `ResearchService` 读取） | — |
-| `api_keys.scopus_key` / `api_keys.elsevier_key` | 未读取；无对应检索实现 | 实现 Scopus / Elsevier 检索源后接回 `LiteratureSearcher.from_config` |
-| `figures.default_journal` / `default_format` / `color_palette` / `font_family` / `font_size_pt` | 未读取；图表样式为固定常量 | 让 `figure_builder.build_figures` 接受这些样式参数并由配置驱动 |
-| `review.include_devil_advocate` / `consensus_threshold` / `score_scale` | 未读取；评审规则在 `peer_reviewer` 中固定 | 让 `peer_reviewer` 接受这些参数并在配置校验中保留 |
+| `paths.*` | `projects_dir` / `output_dir` / `scripts_dir` | **双锚点**：`projects_dir`/`output_dir` 是用户数据，相对**运行目录**解析；`scripts_dir` 是随代码发布的资产，相对**包根目录**解析（保证从任意 cwd 启动都能找到）。绝对路径一律原样使用 |
+| `search.*` | `default_sources` / `max_results` / `year_range` | 原 `default_databases` → `default_sources`（代码概念是检索源）；原 `max_results_per_source` → `max_results`，语义为**总量上限**（Phase 7 已改，沿用旧名会误导）。三者的语义是"**CLI/Web 未显式传参时的默认值**"，显式参数优先；`year_range` 为 `[起, 止]`，**0 = 不限**，`[0,0]` 即不过滤；年份未知的文献**保留**（缺失年份不是"不在范围内"的证据），排除数经 `excluded_by_year` 可见 |
+| `citation.*` | `default_style` / `export_formats` | `default_style` 决定**参考文献列表**样式（`numeric` / `author_year`），未知样式**抛错**而非静默回退；**正文内联标记固定为 `[Pn]`**——确定性引用核验关口依赖该格式，改成 author-year 会让硬阻断失效。`export_formats` 是**导出白名单**：请求白名单外的格式即报错并点名叫键，绝不静默换格式 |
+| `writing.*` | `default_paper_type` / `default_language` / `bilingual_abstract` / `style_guide` | 写作提示词参数化；**不削弱**"不得编造、只能引用给定资料"的既有约束 |
+| `export.*` | `default_format` / `pdf_engine` / `pptx_template` / `include_speaker_notes` | 导出默认格式与引擎 |
+| `logging.*` | `level` / `format` / `file` | 应用入口初始化 logging；未配置时不改变既有行为 |
+| `figures.*` | `default_dpi` / `default_journal` / `default_format` / `color_palette` / `font_family` / `font_size_pt` | 图件样式；**无法真实生效的键如实报告、宁可不接** |
+| `review.*` | `reviewer_count` / `include_devil_advocate` / `consensus_threshold` / `score_scale` | 评审参数；`reviewer_count = 0` 关闭评审阶段 |
+
+保留键：`llm.provider` / `model` / `base_url` / `timeout_seconds` 与 `api_keys` 的
+`pubmed_email` / `semantic_scholar_key` / `crossref_email`（一直由代码读取）。
+
+**注意**：这 7 个键**不经 `DEFAULTS`**，由 `ResearchService` / `build_llm_client` 直接读取，
+其未配置行为由**代码**定义。例如 `llm.provider` 未配置时回退 **`gemini`**（见
+`core/llm_client.py`），**不是** `codex_cli`——这正是它们被移出 `DEFAULTS` 的原因：把它们
+放进 `DEFAULTS` 会造出一个**无人读取、且与代码不符的第二默认值来源**。
+
+### 7.3 两条贯穿性规则
+
+**规则一：shipped 默认值 = 改动前代码的硬编码行为。**
+
+配置文件里给出的默认值必须等于引入配置之前代码的实际行为，否则"**用户什么都不改，产物却
+变了**"。用这把尺子量过全部键，其中四处据此改过：
+`review.consensus_threshold`（`0.6` → `0.0`）、`writing.default_language`（`"zh"` → `""`）、
+`writing.default_paper_type`（`"research_article"` → `""`）、
+`export.include_speaker_notes`（`true` → `false`，现状不写演讲者备注）。
+
+这类缺陷的危险在于**没有任何测试会自然发现**：teammate 的测试只覆盖"数据类默认值"，不覆盖
+"settings 未配置 → 经 `get_*` 得到 shipped 默认值"这条真实路径。
+
+**规则二：每个宣称可配置的键都必须真的被代码读取。**
+
+由 `tests/test_config_honesty.py` 强制：它给 `config_loader` 的全部读取接口装插桩（并替换
+所有模块里**已导入**的同名引用——消费者持有的是函数对象，只补丁原模块无效），驱动真实链路
+`configure_logging → Orchestrator → run_real_research → export → create_app`，一旦发现任何
+`DEFAULTS` 中的键从未被读取即失败。静态的键集检查**抓不到**这一类缺陷，本文件补上了这个缺口。
+
+**配置必须进入续跑指纹**：任何影响某阶段输出的配置都必须出现在**该阶段**的指纹里，否则
+"改了设置却复用旧设置下产出的产物"——系统会报告"复用了全部阶段"，而那是**假的**。
+分组见 `core/resume.py::_STEP_INPUTS`。

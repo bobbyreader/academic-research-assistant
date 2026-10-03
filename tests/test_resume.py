@@ -38,6 +38,23 @@ ALL_FINGERPRINT_KEYS = {
     "reviewer_count": 3,
     "figure_dpi": 300,
     "data_readable": True,
+    # --- Phase 8：影响各阶段输出的配置。这里取"已配置的默认值"（即用户没有改动
+    # settings.yaml 时的实际取值，与 config/settings.yaml 一致），使既有用例在
+    # 行为上完全不变，并代表"配置未改动的一次真实运行"。
+    "search_year_range": (0, 0),
+    "figures_default_journal": "",
+    "figures_default_format": "png",
+    "figures_color_palette": "default",
+    "figures_font_family": "",
+    "figures_font_size_pt": 10,
+    "writing_paper_type": "research_article",
+    "writing_language": "zh",
+    "writing_bilingual_abstract": False,
+    "writing_style_guide": "",
+    "citation_style": "numeric",
+    "review_include_devil_advocate": False,
+    "review_consensus_threshold": 0.6,
+    "review_score_scale": "0-100",
 }
 
 
@@ -47,12 +64,26 @@ def _fingerprint(**overrides: object) -> RunFingerprint:
     return RunFingerprint(
         topic=str(payload["topic"]),
         sources=tuple(payload["sources"]),  # type: ignore[arg-type]
-        max_results=int(payload["max_results"]),  # type: ignore[arg-type]
+        max_results=int(payload["max_results"]),  # type: ignore[call-overload]
         data_sha256=str(payload["data_sha256"]),
         data_name=str(payload["data_name"]),
-        reviewer_count=int(payload["reviewer_count"]),  # type: ignore[arg-type]
-        figure_dpi=int(payload["figure_dpi"]),  # type: ignore[arg-type]
+        reviewer_count=int(payload["reviewer_count"]),  # type: ignore[call-overload]
+        figure_dpi=int(payload["figure_dpi"]),  # type: ignore[call-overload]
         data_readable=bool(payload["data_readable"]),
+        search_year_range=tuple(payload["search_year_range"]),  # type: ignore[arg-type]
+        figures_default_journal=str(payload["figures_default_journal"]),
+        figures_default_format=str(payload["figures_default_format"]),
+        figures_color_palette=str(payload["figures_color_palette"]),
+        figures_font_family=str(payload["figures_font_family"]),
+        figures_font_size_pt=int(payload["figures_font_size_pt"]),  # type: ignore[call-overload]
+        writing_paper_type=str(payload["writing_paper_type"]),
+        writing_language=str(payload["writing_language"]),
+        writing_bilingual_abstract=bool(payload["writing_bilingual_abstract"]),
+        writing_style_guide=str(payload["writing_style_guide"]),
+        citation_style=str(payload["citation_style"]),
+        review_include_devil_advocate=bool(payload["review_include_devil_advocate"]),
+        review_consensus_threshold=float(payload["review_consensus_threshold"]),  # type: ignore[arg-type]
+        review_score_scale=str(payload["review_score_scale"]),
     )
 
 
@@ -485,3 +516,243 @@ def test_describe_reuse_is_prefix_order_independent() -> None:
     assert describe_reuse(shuffled) == describe_reuse(
         ("search", "analysis", "claims", "writing")
     )
+
+
+# --------------------------------------------------------------------------- #
+# 8. Phase 8：配置项进入指纹——"改了设置就必须重跑对应阶段"
+#
+# 这是本阶段最关键的一条正确性属性。漏掉某配置 → 用户改了设置却复用旧设置下
+# 产出的产物，而系统会报告"本次复用了全部阶段"——**这是一句谎**，且用户看不出。
+# 反方向（配置进错阶段）只会白花钱，属于安全方向。
+# --------------------------------------------------------------------------- #
+def test_writing_language_change_invalidates_only_from_writing(tmp_path: Path) -> None:
+    """撰写语言变化 → writing 起失效；search/analysis/claims 不受影响。"""
+    store = ArtifactStore(tmp_path)
+    _write_complete_artifacts(store)
+
+    decision = plan_resume(
+        artifact_store=store,
+        project_name="p",
+        fingerprint=_fingerprint(writing_language="en"),
+        previous_steps=_previous_steps_everything(),
+    )
+
+    assert decision.reusable == ("search", "analysis", "claims")
+    assert not decision.can_skip("writing")
+    assert not decision.can_skip("review")
+    assert "撰写语言" in decision.reason
+
+
+def test_writing_paper_type_and_style_guide_change_invalidate_writing(
+    tmp_path: Path,
+) -> None:
+    """文体与风格约束同样影响手稿正文。"""
+    for override, label in (
+        ({"writing_paper_type": "review"}, "文体"),
+        ({"writing_style_guide": "用被动语态"}, "风格约束"),
+        ({"writing_bilingual_abstract": True}, "双语摘要"),
+    ):
+        store = ArtifactStore(tmp_path / label)
+        _write_complete_artifacts(store)
+
+        decision = plan_resume(
+            artifact_store=store,
+            project_name="p",
+            fingerprint=_fingerprint(**override),
+            previous_steps=_previous_steps_everything(),
+        )
+
+        assert decision.reusable == ("search", "analysis", "claims"), label
+        assert label in decision.reason, label
+
+
+def test_citation_style_change_invalidates_writing(tmp_path: Path) -> None:
+    """引用样式改变参考文献渲染结果，因此属于 writing 的输入。"""
+    store = ArtifactStore(tmp_path)
+    _write_complete_artifacts(store)
+
+    decision = plan_resume(
+        artifact_store=store,
+        project_name="p",
+        fingerprint=_fingerprint(citation_style="author_year"),
+        previous_steps=_previous_steps_everything(),
+    )
+
+    assert decision.reusable == ("search", "analysis", "claims")
+    assert "引用样式" in decision.reason
+
+
+def test_search_year_range_change_invalidates_from_search(tmp_path: Path) -> None:
+    """年份范围改变检索结果集 → 全部阶段失效（含 search 本身）。"""
+    store = ArtifactStore(tmp_path)
+    _write_complete_artifacts(store)
+
+    decision = plan_resume(
+        artifact_store=store,
+        project_name="p",
+        fingerprint=_fingerprint(search_year_range=(2019, 2024)),
+        previous_steps=_previous_steps_everything(),
+    )
+
+    assert decision.reusable == ()
+    assert "检索年份范围" in decision.reason
+
+
+def test_figures_style_change_invalidates_from_analysis(tmp_path: Path) -> None:
+    """图表样式在分析阶段生成 → analysis 起失效，但 search 不受影响。"""
+    for override, label in (
+        ({"figures_color_palette": "colorblind"}, "图表配色"),
+        ({"figures_font_family": "Times New Roman"}, "图表字体"),
+        ({"figures_font_size_pt": 12}, "图表字号"),
+        ({"figures_default_format": "pdf"}, "图表格式"),
+        ({"figures_default_journal": "Nature"}, "图表目标期刊"),
+    ):
+        store = ArtifactStore(tmp_path / label)
+        _write_complete_artifacts(store)
+
+        decision = plan_resume(
+            artifact_store=store,
+            project_name="p",
+            fingerprint=_fingerprint(**override),
+            previous_steps=_previous_steps_everything(),
+        )
+
+        assert decision.reusable == ("search",), label
+        assert label in decision.reason, label
+
+
+def test_review_config_change_invalidates_only_review(tmp_path: Path) -> None:
+    """评审配置只应让 review 失效——否则会让全部模型调用重做。"""
+    for override, label in (
+        ({"review_include_devil_advocate": True}, "反对意见要求"),
+        ({"review_consensus_threshold": 0.9}, "评审一致度阈值"),
+        ({"review_score_scale": "0-10"}, "评分刻度"),
+    ):
+        store = ArtifactStore(tmp_path / label)
+        _write_complete_artifacts(store)
+
+        decision = plan_resume(
+            artifact_store=store,
+            project_name="p",
+            fingerprint=_fingerprint(**override),
+            previous_steps=_previous_steps_everything(),
+        )
+
+        assert decision.reusable == ("search", "analysis", "claims", "writing"), label
+        assert not decision.can_skip("review"), label
+        assert label in decision.reason, label
+
+
+def test_writing_config_does_not_invalidate_earlier_stages(tmp_path: Path) -> None:
+    """反向约束：撰写配置**不得**进入 search/analysis 的作用域。
+
+    进错阶段只会白花钱（安全方向），但会让"改个语言就重新付费检索"这种浪费复活，
+    因此同样要钉死。
+    """
+    from core.resume import _STEP_INPUTS
+
+    for step in ("search", "analysis", "claims"):
+        assert "writing_language" not in _STEP_INPUTS[step], step
+        assert "citation_style" not in _STEP_INPUTS[step], step
+    for step in ("search", "analysis", "claims", "writing"):
+        assert "review_consensus_threshold" not in _STEP_INPUTS[step], step
+    assert "search_year_range" not in _STEP_INPUTS["analysis"]
+
+
+# --------------------------------------------------------------------------- #
+# 9. Phase 8：旧记录的保守语义 + 读取健壮性
+# --------------------------------------------------------------------------- #
+LEGACY_RECORD = {
+    "topic": "climate",
+    "sources": ["crossref", "pubmed"],
+    "max_results": 10,
+    "data_sha256": "abc123",
+    "data_name": "data.csv",
+    "reviewer_count": 3,
+    "figure_dpi": 300,
+    "data_readable": True,
+}
+
+
+def test_legacy_record_is_conservative_about_phase8_keys() -> None:
+    """Phase 8 之前的记录缺失新键 → 取保守哨兵，**不**冒充成"已配置的取值"。
+
+    若默认值取 `config_loader.DEFAULTS`（`"zh"` / `10` / `0.6`），就等于断言旧运行
+    当时确实用了这些设置——而我们无法确认。默认值因此刻意与已配置取值不同，
+    使对应阶段重跑一次。宁可重跑，也不能把旧设置下的产物冒充成当前设置的结果。
+    """
+    restored = RunFingerprint.from_dict(LEGACY_RECORD)
+
+    assert restored is not None
+    configured = _fingerprint()
+    # 逐项：哨兵值必须与"已配置取值"不同，因此旧记录不会与当前运行匹配。
+    assert restored.writing_language != configured.writing_language
+    assert restored.citation_style != configured.citation_style
+    assert restored.figures_font_size_pt != configured.figures_font_size_pt
+    assert restored.review_consensus_threshold != configured.review_consensus_threshold
+    assert restored != configured
+    # 唯一例外：年份范围的哨兵与默认同为"不过滤"，语义确实一致。
+    assert restored.search_year_range == (0, 0)
+    assert restored.search_year_range == configured.search_year_range
+
+
+def test_legacy_record_keeps_search_reusable_but_not_later_stages(
+    tmp_path: Path,
+) -> None:
+    """旧记录的 search 仍可复用（年份范围语义一致），analysis 起必须重跑。"""
+    store = ArtifactStore(tmp_path)
+    _write_complete_artifacts(store)
+    restored = RunFingerprint.from_dict(LEGACY_RECORD)
+    assert restored is not None
+
+    decision = plan_resume(
+        artifact_store=store,
+        project_name="p",
+        fingerprint=_fingerprint(),
+        previous_steps={
+            "search": restored,
+            "lit_review": restored,
+            "writing": restored,
+            "review": restored,
+        },
+    )
+
+    assert decision.reusable == ("search",)
+
+
+def test_phase8_key_with_wrong_type_makes_record_unusable() -> None:
+    """键存在但类型非法 → 记录损坏 → 不复用（而不是"放心复用"）。"""
+    for bad_key, bad_value in (
+        ("writing_language", 123),
+        ("writing_bilingual_abstract", "yes"),
+        ("figures_font_size_pt", "10"),
+        ("review_consensus_threshold", "0.6"),
+        ("search_year_range", [1, 2, 3]),
+        ("search_year_range", "2019-2024"),
+        ("citation_style", None),
+    ):
+        payload = dict(LEGACY_RECORD)
+        payload[bad_key] = bad_value
+        assert RunFingerprint.from_dict(payload) is None, (bad_key, bad_value)
+
+
+def test_roundtrip_preserves_phase8_config_fields() -> None:
+    """序列化往返必须逐字段保真，否则续跑判定会基于失真的输入。"""
+    original = _fingerprint(
+        search_year_range=(2019, 2024),
+        figures_default_journal="Nature",
+        figures_default_format="pdf",
+        figures_color_palette="colorblind",
+        figures_font_family="Times New Roman",
+        figures_font_size_pt=12,
+        writing_paper_type="review",
+        writing_language="en",
+        writing_bilingual_abstract=True,
+        writing_style_guide="被动语态",
+        citation_style="author_year",
+        review_include_devil_advocate=True,
+        review_consensus_threshold=0.9,
+        review_score_scale="0-10",
+    )
+
+    assert RunFingerprint.from_dict(original.to_dict()) == original

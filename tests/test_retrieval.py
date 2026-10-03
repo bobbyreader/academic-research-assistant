@@ -564,6 +564,72 @@ def test_normalize_doi_is_authoritative_and_shared() -> None:
     assert _normalize_doi(value) == normalize_doi(value)
 
 
+# --------------------------------------------------------------------------- #
+# search.year_range 的年份谓词（唯一权威实现，钉死语义）
+# --------------------------------------------------------------------------- #
+def test_in_year_range_none_bounds_always_keeps() -> None:
+    from core.external_clients import _in_year_range
+
+    # bounds 为 None（不过滤）：任何年份、包括 None，都保留。
+    assert _in_year_range(1990, None)
+    assert _in_year_range(2999, None)
+    assert _in_year_range(None, None)
+
+
+def test_in_year_range_keeps_unknown_year_by_decision() -> None:
+    """**钉死取舍**：``year=None`` 保留（宁可多留也不静默丢证据）。"""
+    from core.external_clients import _in_year_range
+
+    assert _in_year_range(None, (2010, 2020))
+    assert _in_year_range(None, (2010, 0))
+    assert _in_year_range(None, (0, 2020))
+
+
+def test_in_year_range_bounds_are_inclusive_and_unbounded_zero() -> None:
+    from core.external_clients import _in_year_range
+
+    assert _in_year_range(2010, (2010, 2020))          # 起始年含
+    assert _in_year_range(2020, (2010, 2020))          # 结束年含
+    assert not _in_year_range(2009, (2010, 2020))
+    assert not _in_year_range(2021, (2010, 2020))
+    # 单边为 0 = 该边不限：``(2010, 0)`` 表示"2010 年及以后"。
+    assert _in_year_range(2010, (2010, 0))
+    assert _in_year_range(2999, (2010, 0))
+    assert not _in_year_range(1990, (2010, 0))
+    # ``(0, 2020)`` 表示"2020 年及以前"。
+    assert _in_year_range(1990, (0, 2020))
+    assert _in_year_range(2020, (0, 2020))
+    assert not _in_year_range(2021, (0, 2020))
+
+
+def test_normalize_year_range_semantics() -> None:
+    from core.external_clients import _normalize_year_range
+
+    # None 与 [0,0] 都归一为"不过滤"。
+    assert _normalize_year_range(None) is None
+    assert _normalize_year_range([0, 0]) is None
+    assert _normalize_year_range((0, 0)) is None
+    # 其他一律原样返回（含单边为 0）。
+    assert _normalize_year_range([2010, 2020]) == (2010, 2020)
+    assert _normalize_year_range((2010, 0)) == (2010, 0)
+    assert _normalize_year_range((0, 2020)) == (0, 2020)
+    # 非法形状抛 ValueError、非法类型抛 TypeError，都必须尽早失败。
+    for bad in ((2020,), (2020, 2021, 2022)):
+        try:
+            _normalize_year_range(bad)  # type: ignore[arg-type]
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{bad!r} 应当抛 ValueError")
+    for bad in ((2020, "x"), (True, 2020)):
+        try:
+            _normalize_year_range(bad)  # type: ignore[arg-type]
+        except TypeError:
+            pass
+        else:
+            raise AssertionError(f"{bad!r} 应当抛 TypeError")
+
+
 def test_dedup_merges_url_form_and_bare_doi() -> None:
     p1 = ("a", PaperRecord(title="A", doi="https://doi.org/10.1234/x"))
     p2 = ("b", PaperRecord(title="B", doi="10.1234/x"))

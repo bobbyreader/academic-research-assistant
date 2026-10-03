@@ -17,11 +17,12 @@ from typing import Any
 from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.utils import secure_filename
 
-from core.artifact_store import ArtifactStore
+from core.artifact_store import ArtifactStore, resolve_paths
+from core.config_loader import get_int, get_str_list, load_settings
 from core.research_pipeline import ResearchPipelineCancelled
 from core.resume import RESUME_STEPS
 from core.state_manager import ProjectState, StateManager
-from orchestrator import Orchestrator
+from orchestrator import Orchestrator, configure_logging
 
 #: 会产生 LLM 调用的阶段：用于如实判断"本次是否调用过模型"。
 _LLM_STEPS = ("analysis", "claims", "writing", "review")
@@ -310,6 +311,20 @@ def create_app(
     """Create the local Web UI application."""
     project_root = (base_dir or Path.cwd()).resolve()
     source_root = Path(__file__).parent.resolve()
+    # 项目根目录由 ``paths.projects_dir`` 决定（唯一入口 ``resolve_paths``：相对
+    # 仓库根解析、绝对路径原样）。未配置时回退 DEFAULTS "projects"，与改动前一致。
+    # 用 ``load_settings``（非校验版）：Web 启动不应因配置非法而崩溃，配置校验的
+    # 快速失败仍由 ``ResearchService.run`` 负责。
+    settings = load_settings(project_root)
+    resolved_paths = resolve_paths(project_root, settings)
+    projects_dir = resolved_paths["projects_dir"]
+    # 检索默认值来自 config/settings.yaml 的 search.*：POST /api/research 未显式传
+    # sources / max_results 时回退到它们（与 CLI 的"参数优先、配置作默认"语义一致）。
+    default_sources = get_str_list(settings, "search.default_sources")
+    default_max_results = get_int(settings, "search.max_results")
+    # 导出白名单来自 citation.export_formats：Web 选择导出格式时同受其约束
+    # （Orchestrator.export 内部也会再次校验，双重保证配置真实生效）。
+    configured_export_formats = get_str_list(settings, "citation.export_formats")
     app = Flask(
         __name__,
         template_folder=str(source_root / "web" / "templates"),
@@ -317,6 +332,7 @@ def create_app(
     )
     app.config.update(
         BASE_DIR=project_root,
+        PROJECTS_DIR=projects_dir,
         ORCHESTRATOR_FACTORY=orchestrator_factory or Orchestrator,
         MAX_CONTENT_LENGTH=10 * 1024 * 1024,
     )
@@ -324,10 +340,10 @@ def create_app(
     app.extensions["research_jobs"] = jobs
 
     def state_manager() -> StateManager:
-        return StateManager(project_root / "projects")
+        return StateManager(projects_dir)
 
     def artifact_store() -> ArtifactStore:
-        return ArtifactStore(project_root / "projects")
+        return ArtifactStore(projects_dir)
 
     @app.get("/")
     def index() -> str:
@@ -350,7 +366,6 @@ def create_app(
     def projects() -> Any:
         manager = state_manager()
         result = []
-        projects_dir = project_root / "projects"
         if projects_dir.exists():
             for directory in sorted(projects_dir.iterdir(), key=lambda path: path.name, reverse=True):
                 state = manager.load(directory.name) if directory.is_dir() else None
@@ -381,7 +396,7 @@ def create_app(
             return jsonify(error=str(exc)), 400
         if format not in EXPORTS:
             return jsonify(error="不支持的导出格式"), 400
-        path = project_root / "projects" / project_name / "exports" / f"{project_name}_final.{format}"
+        path = projects_dir / project_name / "exports" / f"{project_name}_final.{format}"
         if not path.is_file():
             return jsonify(error="该格式尚未生成"), 404
         return send_file(path, as_attachment=True, download_name=path.name)
@@ -420,13 +435,28 @@ def create_app(
 
             requested_name = str(payload.get("project_name", "")).strip()
             project_name = _validate_project_name(requested_name) if requested_name else _make_project_name(topic)
-            sources = [source for source in _list_value(payload.get("sources"), ["crossref", "pubmed", "semantic_scholar"]) if source in SOURCES]
+            # 未显式传 sources 时回退到配置默认值（search.default_sources）。空列表
+            # 同样视为"未提供"（HTML 表单未勾选任何复选框时即如此），因此先取
+            # `_list_value` 再判空回退，避免把"没勾选"误报成"至少选择一个检索源"。
+            selected_sources = _list_value(payload.get("sources"), [])
+            if not selected_sources:
+                selected_sources = default_sources
+            sources = [source for source in selected_sources if source in SOURCES]
             if not sources:
                 raise ValueError("至少选择一个检索源")
-            max_results = int(payload.get("max_results", 10))
+            max_results = int(payload.get("max_results") or default_max_results)
             if not 1 <= max_results <= 50:
                 raise ValueError("每个检索源的文献数量应为 1–50")
-            exports = [fmt for fmt in _list_value(payload.get("exports"), ["md"]) if fmt in EXPORTS]
+            # 导出格式须同时是全局合法格式（EXPORTS）与 citation.export_formats
+            # 白名单成员；白名单为空时视为不限制（与 export_service 语义一致）。
+            allowed_exports = (
+                set(configured_export_formats) if configured_export_formats else EXPORTS
+            )
+            exports = [
+                fmt
+                for fmt in _list_value(payload.get("exports"), ["md"])
+                if fmt in EXPORTS and fmt in allowed_exports
+            ]
             if not exports:
                 raise ValueError("至少选择一种导出格式")
             provider = str(payload.get("provider", "codex_cli")).strip().lower()
@@ -558,6 +588,8 @@ def main() -> None:
     )
     parser.add_argument("--base-dir", type=Path, default=Path.cwd(), help="项目根目录")
     args = parser.parse_args()
+    # 应用入口按 logging.* 初始化日志（级别/格式/可选文件），与 CLI 走同一入口。
+    configure_logging(args.base_dir)
     app = create_app(args.base_dir)
     print(f"研究助手 Web UI: http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)

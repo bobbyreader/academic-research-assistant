@@ -478,3 +478,180 @@ def test_search_deduplicates_repeated_source_names() -> None:
     assert report.sources_attempted == ["ok"]
     assert report.total_found == 1
     assert sum(report.counts_by_source.values()) == report.total_found
+
+
+# --------------------------------------------------------------------------- #
+# search.year_range：年份过滤（真实实现，非"只读配置"）
+# --------------------------------------------------------------------------- #
+def _year_paper(title: str, year: int | None, doi: str) -> PaperRecord:
+    return PaperRecord(title=title, doi=doi, year=year)
+
+
+def test_year_range_default_and_zero_zero_do_not_filter() -> None:
+    """``None`` 与 ``[0, 0]`` 都表示不过滤——行为与 Phase 7 逐字节一致。"""
+    papers = [
+        _year_paper("old", 1999, "10.y/old"),
+        _year_paper("mid", 2015, "10.y/mid"),
+        _year_paper("new", 2025, "10.y/new"),
+        _year_paper("unknown", None, "10.y/unknown"),
+    ]
+
+    def build(year_range: tuple[int, int] | None) -> tuple[list[str], int, list[str]]:
+        report = LiteratureSearcher({"a": _StubSource("a", papers)}).search(
+            "t", ["a"], 10, year_range
+        )
+        return (
+            [paper.doi for paper in report.papers],
+            report.excluded_by_year,
+            list(report.ranking_reasons),
+        )
+
+    no_arg = build(None)
+    zero_zero = build((0, 0))
+
+    assert no_arg == zero_zero
+    # 顺序由排序决定（新近优先），这里只断言集合与可见字段一致。
+    assert sorted(no_arg[0]) == ["10.y/mid", "10.y/new", "10.y/old", "10.y/unknown"]
+    assert no_arg[1] == 0
+    # 不过滤时不出现年份过滤说明，排序依据与 Phase 7 一致。
+    assert not any("年份范围过滤" in reason for reason in no_arg[2])
+
+
+def test_year_range_filters_both_bounds_and_reports_excluded() -> None:
+    papers = [
+        _year_paper("too-old", 1990, "10.y/old"),
+        _year_paper("in-1", 2010, "10.y/in1"),
+        _year_paper("in-2", 2015, "10.y/in2"),
+        _year_paper("too-new", 2025, "10.y/new"),
+    ]
+    report = LiteratureSearcher({"a": _StubSource("a", papers)}).search(
+        "t", ["a"], 10, (2010, 2015)
+    )
+
+    assert sorted(paper.doi for paper in report.papers) == ["10.y/in1", "10.y/in2"]
+    # 边界包含：起始年与结束年都在范围内。
+    assert report.excluded_by_year == 2
+    assert any("年份范围过滤" in reason for reason in report.ranking_reasons)
+    assert any("2 篇" in reason for reason in report.ranking_reasons)
+
+
+def test_year_range_single_sided_zero_means_unbounded() -> None:
+    papers = [
+        _year_paper("1999", 1999, "10.y/a"),
+        _year_paper("2010", 2010, "10.y/b"),
+        _year_paper("2020", 2020, "10.y/c"),
+    ]
+
+    lower_only = LiteratureSearcher({"a": _StubSource("a", papers)}).search(
+        "t", ["a"], 10, (2010, 0)
+    )
+    upper_only = LiteratureSearcher({"a": _StubSource("a", papers)}).search(
+        "t", ["a"], 10, (0, 2010)
+    )
+
+    assert sorted(p.doi for p in lower_only.papers) == ["10.y/b", "10.y/c"]
+    assert lower_only.excluded_by_year == 1
+    assert sorted(p.doi for p in upper_only.papers) == ["10.y/a", "10.y/b"]
+    assert upper_only.excluded_by_year == 1
+
+
+def test_year_range_keeps_papers_with_unknown_year_but_makes_it_visible() -> None:
+    """**选定语义：``year`` 为 ``None`` 的文献被保留**（宁可多留也不丢证据）。
+
+    年份缺失是上游元数据不全，不是"不在范围内"的证据。保留必须**可见**。
+    """
+    papers = [
+        _year_paper("in", 2015, "10.y/in"),
+        _year_paper("unknown-a", None, "10.y/unknown-a"),
+        _year_paper("unknown-b", None, "10.y/unknown-b"),
+        _year_paper("out", 1990, "10.y/out"),
+    ]
+    report = LiteratureSearcher({"a": _StubSource("a", papers)}).search(
+        "t", ["a"], 10, (2010, 2020)
+    )
+
+    assert sorted(paper.doi for paper in report.papers) == [
+        "10.y/in",
+        "10.y/unknown-a",
+        "10.y/unknown-b",
+    ]
+    # 无年份文献**不**计入排除数。
+    assert report.excluded_by_year == 1
+    # 保留无年份文献这一事实必须可见，避免用户误以为"范围内只有这些"。
+    assert any("年份未知" in reason for reason in report.ranking_reasons)
+
+
+def test_year_range_exclusion_accounting_is_arithmetically_consistent() -> None:
+    papers = [
+        _year_paper("a", 2000, "10.y/a"),
+        _year_paper("b", 2010, "10.y/b"),
+        _year_paper("c", 2020, "10.y/c"),
+        _year_paper("d", None, "10.y/d"),
+    ]
+    report = LiteratureSearcher({"a": _StubSource("a", papers)}).search(
+        "t", ["a"], 10, (2005, 2015)
+    )
+
+    assert report.deduplicated_count == 4
+    assert report.excluded_by_year == 2                 # 2000 与 2020 出界
+    assert len(report.papers) == 2                      # 2010（在范围内）+ 无年份
+    # 算术自洽：去重候选 = 范围外 + 最终保留 + 总量上限裁掉。
+    assert report.deduplicated_count == (
+        report.excluded_by_year + len(report.papers) + report.dropped_by_limit
+    )
+    assert report.dropped_by_limit == 0
+
+
+def test_year_range_interacts_with_max_results_cap() -> None:
+    """过滤先于总量裁剪：上限只作用于"范围内"的候选。"""
+    papers = [_year_paper(f"p{i}", 2000 + i, f"10.y/{i}") for i in range(6)]
+    report = LiteratureSearcher({"a": _StubSource("a", papers)}).search(
+        "t", ["a"], 2, (2002, 2004)  # 范围内 3 篇（2002/2003/2004），上限 2
+    )
+
+    assert report.excluded_by_year == 3
+    assert len(report.papers) == 2
+    assert report.dropped_by_limit == 1
+    assert report.deduplicated_count == (
+        report.excluded_by_year + len(report.papers) + report.dropped_by_limit
+    )
+
+
+def test_year_range_filter_preserves_determinism_across_source_order() -> None:
+    """过滤不得破坏确定性：同一集合 + 同一范围，任意源顺序结果一致。"""
+
+    def build(order: list[str]) -> list[str]:
+        sources = {
+            "a": _StubSource(
+                "a",
+                [_year_paper("sleep memory", 2015, "10.y/a"), _year_paper("x", 1990, "10.y/d")],
+            ),
+            "b": _StubSource(
+                "b",
+                [_year_paper("sleep memory", 2016, "10.y/b"), _year_paper("y", None, "10.y/e")],
+            ),
+            "c": _StubSource("c", [_year_paper("sleep and memory", 2015, "10.y/c")]),
+        }
+        report = LiteratureSearcher(sources).search("sleep memory", order, 10, (2010, 2020))
+        return [paper.doi for paper in report.papers]
+
+    baseline = build(["a", "b", "c"])
+    for order in permutations(["a", "b", "c"]):
+        assert build(list(order)) == baseline
+
+
+def test_year_range_invalid_shape_raises_before_searching() -> None:
+    """非二元范围是编程错误，必须尽早失败（不发起检索）。"""
+    source = _StubSource("a", [])
+
+    for bad in ((2020,), (2020, 2021, 2022)):
+        try:
+            LiteratureSearcher({"a": source}).search("t", ["a"], 5, bad)
+        except ValueError as exc:
+            assert "year_range" in str(exc)
+        else:
+            raise AssertionError("非法 year_range 应当抛 ValueError")
+
+    assert source.received_budget is None  # 未发起任何检索
+
+

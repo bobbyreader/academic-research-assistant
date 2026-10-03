@@ -39,7 +39,13 @@ DATASET = (
 class FakeSearcher:
     """Stands in for the four real literature APIs."""
 
-    def search(self, query: str, sources: list[str], max_results: int) -> SearchReport:
+    def search(
+        self,
+        query: str,
+        sources: list[str],
+        max_results: int,
+        year_range: tuple[int, int] | list[int] | None = None,
+    ) -> SearchReport:
         return SearchReport(
             papers=[
                 PaperRecord(
@@ -426,10 +432,18 @@ class CountingSearcher:
     def __init__(self) -> None:
         self.search_calls = 0
         self.queries: list[str] = []
+        self.year_ranges: list[tuple[int, int] | list[int] | None] = []
 
-    def search(self, query: str, sources: list[str], max_results: int) -> SearchReport:
+    def search(
+        self,
+        query: str,
+        sources: list[str],
+        max_results: int,
+        year_range: tuple[int, int] | list[int] | None = None,
+    ) -> SearchReport:
         self.search_calls += 1
         self.queries.append(query)
+        self.year_ranges.append(year_range)
         return SearchReport(
             papers=[
                 PaperRecord(
@@ -859,7 +873,13 @@ class LimitSearcher:
     dropped_by_limit / ranking_reasons), as the real searcher now does.
     """
 
-    def search(self, query: str, sources: list[str], max_results: int) -> SearchReport:
+    def search(
+        self,
+        query: str,
+        sources: list[str],
+        max_results: int,
+        year_range: tuple[int, int] | list[int] | None = None,
+    ) -> SearchReport:
         papers = [
             PaperRecord(
                 title=f"Candidate paper {index}",

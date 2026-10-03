@@ -244,3 +244,192 @@ def test_multiple_categorical_candidates_warns(tmp_path: Path) -> None:
     bundle = build_figures(csv_path, out)
 
     assert any("多个候选分组列" in warning for warning in bundle.warnings)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8：figures.* 样式参数
+# --------------------------------------------------------------------------- #
+def _sample_csv(tmp_path: Path) -> Path:
+    """一张稳定的样例 CSV（两数值列，无分类列）。"""
+    return _write_csv(
+        tmp_path / "style.csv",
+        "score,weight\n1,10\n2,12\n3,11\n4,15\n5,20\n6,22\n",
+    )
+
+
+def test_default_arguments_keep_png_only(tmp_path: Path) -> None:
+    """不传样式参数时仅产出默认 png（默认口径不变）。"""
+    out = tmp_path / "figures"
+
+    bundle = build_figures(_sample_csv(tmp_path), out)
+
+    assert bundle.figures
+    assert all(fig.filename.endswith(".png") for fig in bundle.figures)
+    assert not list(out.glob("*.pdf"))
+    assert not list(out.glob("*.svg"))
+
+
+def test_default_format_selects_output_extension(tmp_path: Path) -> None:
+    """default_format="pdf" 应让所有图件以 .pdf 为主格式真实落盘。"""
+    out = tmp_path / "figures"
+
+    bundle = build_figures(_sample_csv(tmp_path), out, default_format="pdf")
+
+    assert bundle.figures
+    assert all(fig.filename.endswith(".pdf") for fig in bundle.figures)
+    assert list(out.glob("*.pdf")), "应真的产出 PDF 文件"
+
+
+def test_explicit_formats_override_default_format(tmp_path: Path) -> None:
+    """显式 formats 优先于 default_format。"""
+    out = tmp_path / "figures"
+
+    bundle = build_figures(
+        _sample_csv(tmp_path), out, formats=("png",), default_format="svg"
+    )
+
+    assert bundle.figures
+    assert all(fig.filename.endswith(".png") for fig in bundle.figures)
+
+
+def test_default_arguments_are_byte_identical_to_pre_phase8(tmp_path: Path) -> None:
+    """缺省样式参数（含 default_format 默认值）下，两次运行逐字节一致。
+
+    这是 Phase 5.5 的回归要求：默认行为不得被样式接入改变。
+    """
+    csv_path = _sample_csv(tmp_path)
+    out_one = tmp_path / "run1"
+    out_two = tmp_path / "run2"
+
+    build_figures(csv_path, out_one, formats=("png", "pdf"))
+    build_figures(csv_path, out_two, formats=("png", "pdf"))
+
+    def _digests(directory: Path) -> dict[str, str]:
+        return {
+            path.name: hashlib.md5(path.read_bytes()).hexdigest()
+            for path in sorted(directory.glob("*"))
+        }
+
+    assert _digests(out_one) == _digests(out_two)
+
+
+def test_default_format_png_is_noop_compared_to_omitted(tmp_path: Path) -> None:
+    """显式 default_format="png"（即默认值）与完全不传的产物逐字节一致。"""
+    csv_path = _sample_csv(tmp_path)
+    out_omitted = tmp_path / "omitted"
+    out_explicit = tmp_path / "explicit"
+
+    build_figures(csv_path, out_omitted)
+    build_figures(csv_path, out_explicit, default_format="png")
+
+    def _digests(directory: Path) -> dict[str, str]:
+        return {
+            path.name: hashlib.md5(path.read_bytes()).hexdigest()
+            for path in sorted(directory.glob("*"))
+        }
+
+    assert _digests(out_omitted) == _digests(out_explicit) != {}
+
+
+def test_font_size_pt_is_applied_to_rcparams(tmp_path: Path) -> None:
+    """font_size_pt 应真实改写 matplotlib 的基准字号。"""
+    import matplotlib.pyplot as plt
+
+    out = tmp_path / "figures"
+
+    build_figures(_sample_csv(tmp_path), out, font_size_pt=17)
+
+    assert plt.rcParams["axes.labelsize"] == 19  # 基础 + 2
+    assert plt.rcParams["xtick.labelsize"] == 17
+    assert plt.rcParams["ytick.labelsize"] == 17
+    assert plt.rcParams["legend.fontsize"] == 17
+    assert plt.rcParams["axes.titlesize"] == 20  # 基础 + 3
+
+
+def test_font_size_pt_default_matches_historical_values(tmp_path: Path) -> None:
+    """缺省字号下 rcParams 与改动前完全一致（标题 13 / 其余 10）。"""
+    import matplotlib.pyplot as plt
+
+    out = tmp_path / "figures"
+
+    build_figures(_sample_csv(tmp_path), out)
+
+    assert plt.rcParams["axes.titlesize"] == 13
+    assert plt.rcParams["axes.labelsize"] == 12
+    assert plt.rcParams["xtick.labelsize"] == 10
+    assert plt.rcParams["ytick.labelsize"] == 10
+    assert plt.rcParams["legend.fontsize"] == 10
+
+
+def test_unknown_color_palette_warns_and_falls_back(tmp_path: Path) -> None:
+    """未注册的配色名应记录警告（不静默）并回退到默认配色。"""
+    out = tmp_path / "figures"
+
+    bundle = build_figures(_sample_csv(tmp_path), out, palette="viridis")
+
+    assert any("配色方案" in warning for warning in bundle.warnings)
+    assert bundle.figures, "回退后仍应正常出图"
+
+
+def test_registered_default_palette_does_not_warn(tmp_path: Path) -> None:
+    """已注册的 "default" 配色不应产生警告。"""
+    out = tmp_path / "figures"
+
+    bundle = build_figures(_sample_csv(tmp_path), out, palette="default")
+
+    assert not any("配色方案" in warning for warning in bundle.warnings)
+
+
+def test_unavailable_font_family_warns_without_pretending(tmp_path: Path) -> None:
+    """系统不存在的字体族：如实记录警告，绝不假装接上。"""
+    import matplotlib.font_manager as fm
+
+    out = tmp_path / "figures"
+    missing = "Definitely-Not-A-Real-Font-XYZ"
+
+    assert missing not in {font.name for font in fm.fontManager.ttflist}
+
+    bundle = build_figures(_sample_csv(tmp_path), out, font_family=missing)
+
+    assert any("字体族" in warning for warning in bundle.warnings)
+
+
+def test_available_font_family_is_applied_without_warning(tmp_path: Path) -> None:
+    """系统存在的字体族：应置于字体链首位且不产生字体警告。"""
+    import matplotlib.font_manager as fm
+    import matplotlib.pyplot as plt
+
+    out = tmp_path / "figures"
+    installed = [font.name for font in fm.fontManager.ttflist]
+    if not installed:
+        # 极端环境（无任何字体）下无法验证「已安装」分支，跳过而非误报。
+        import pytest
+
+        pytest.skip("系统未安装任何 matplotlib 字体")
+    chosen = installed[0]
+
+    bundle = build_figures(_sample_csv(tmp_path), out, font_family=chosen)
+
+    assert not any("字体族" in warning for warning in bundle.warnings)
+    assert plt.rcParams["font.sans-serif"][0] == chosen
+
+
+def test_default_journal_is_reported_as_not_effective(tmp_path: Path) -> None:
+    """figures.default_journal 无法真实生效（后端不支持按期刊推导样式）。
+
+    本测试**记录该事实**：非空时必须产生一条"未生效"的警告，而不是假装接上。
+    """
+    out = tmp_path / "figures"
+
+    bundle = build_figures(_sample_csv(tmp_path), out, default_journal="Nature")
+
+    assert any("default_journal" in warning for warning in bundle.warnings)
+
+
+def test_empty_default_journal_produces_no_warning(tmp_path: Path) -> None:
+    """default_journal 留空（默认）时不应产生警告。"""
+    out = tmp_path / "figures"
+
+    bundle = build_figures(_sample_csv(tmp_path), out, default_journal="")
+
+    assert not any("default_journal" in warning for warning in bundle.warnings)

@@ -7,7 +7,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from core.artifact_store import ArtifactStore
 from core.citation_verifier import (
@@ -71,6 +71,44 @@ class ResearchPipelineConfig:
     )
     max_results: int = 10
     data_path: Path | None = None
+    # --- writing.* 参数化（缺省为空串/False，提示词与改动前逐字节一致） -----
+    #: 文体要求（如 research_article / review / letter）。空串表示不追加文体约束。
+    writing_paper_type: str = ""
+    #: 正文语言（zh / en）。空串表示沿用现状提示词（不追加语言约束）。
+    writing_language: str = ""
+    #: 为真时要求中英双语摘要。
+    writing_bilingual_abstract: bool = False
+    #: 非空时作为额外风格约束注入写作提示词。
+    writing_style_guide: str = ""
+    #: 引用样式，**仅作用于参考文献列表**（``## References`` 章节）。
+    #: 缺省为空串 ⇒ 等价于 ``numeric``，输出逐字节一致。
+    #: **正文内联标记固定为 ``[Pn]``，不受此键影响**：确定性引用核验关口
+    #: (``core.citation_verifier.MARKER_PATTERN = r"\[P(\d+)\]"``) 依赖该格式，
+    #: 改成 author-year 会让硬阻断关口失效，属被禁止的完整性削弱。
+    citation_style: str = ""
+    # --- figures.* 图表样式（本模块只透传，figure_builder 生效） --------------
+    figures_default_journal: str = ""
+    figures_default_format: str = ""
+    figures_color_palette: str = ""
+    figures_font_family: str = ""
+    figures_font_size_pt: int = 0
+    # --- review.* 参数化（缺省时评审行为不变） ------------------------------
+    #: 为真时要求评审员提出一条明确的反对意见（devil's advocate）。
+    review_include_devil_advocate: bool = False
+    #: 多评审员一致度阈值；低于该阈值时在结论里标注"评审意见分歧"。
+    #: **``0.0`` 是哨兵——表示"未配置 → 沿用既有硬编码行为"**（一致度天然 ≥ 0，
+    #: 永不触发分歧标注），而不是"阈值 = 0"。``wiring-dev`` 会从配置读入真实值
+    #: （默认 0.6），届时才真正生效。
+    review_consensus_threshold: float = 0.0
+    #: 评分刻度（如 "0-100" / "0-10"）。空串表示不追加刻度标注。
+    review_score_scale: str = ""
+    # --- export.* 参数化（缺省时导出产物不变） ------------------------------
+    export_default_format: str = ""
+    export_pdf_engine: str = ""
+    export_pptx_template: str = ""
+    export_include_speaker_notes: bool = False
+    # --- search.* 年份窗口（(0, 0) 表示不限，透传给检索层） ------------------
+    search_year_range: tuple[int, int] = (0, 0)
 
 
 @dataclass
@@ -202,6 +240,9 @@ class ResearchPipeline:
                 config.topic,
                 config.sources,
                 config.max_results,
+                # ``(0, 0)``（缺省）在检索层归一化为 None ⇒ 不过滤，与改动前逐字节
+                # 一致；非缺省时才真正按年份窗口筛选。
+                year_range=config.search_year_range,
             )
             if not report.papers:
                 details = "; ".join(report.errors) or "没有检索到文献"
@@ -290,7 +331,11 @@ class ResearchPipeline:
                 )
         if dataset is None or analysis is None:
             data_summary = analyze_csv(config.data_path) if config.data_path else None
-            dataset = self._analyze_dataset(config.project_name, config.data_path)
+            dataset = self._analyze_dataset(
+                config.project_name,
+                config.data_path,
+                self._figure_style_kwargs(config),
+            )
             artifacts.extend(dataset.artifacts)
             analysis = self._normalize_analysis(
                 self.llm_client.complete_json(
@@ -393,7 +438,7 @@ class ResearchPipeline:
                 )
         if not writing_rehydrated:
             body = self.llm_client.complete(
-                self._writing_system_prompt(),
+                self._writing_system_prompt(config),
                 self._writing_user_prompt(
                     config.topic, analysis, report.papers, data_summary, dataset
                 ),
@@ -457,7 +502,9 @@ class ResearchPipeline:
             artifacts.extend(manuscript_claim_artifacts)
             claim_warnings.extend(manuscript_claim_warnings)
 
-            manuscript = self._assemble_manuscript(body, report.papers, dataset)
+            manuscript = self._assemble_manuscript(
+                body, report.papers, dataset, config.citation_style
+            )
 
         # 到这里 writing 阶段必定已执行（或被重水化），其内存对象非空。
         assert body is not None and verification is not None and manuscript is not None
@@ -1103,14 +1150,49 @@ class ResearchPipeline:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _figure_style_kwargs(config: ResearchPipelineConfig) -> dict[str, Any]:
+        """把 ``figures.*`` 配置映射为 ``build_figures`` 的样式关键字参数。
+
+        **缺省即不传**：只有配置值非缺省时才会出现在返回的 dict 中，从而让缺省
+        运行与改动前的调用**逐字节一致**（连告警都不新增）。映射约定：
+
+        * ``figures_color_palette``：``""`` / ``"default"`` = 沿用绘图后端的默认
+          配色（Okabe-Ito），**不传**——把字面量 ``"default"`` 传给后端只会触发一条
+          "未注册配色"告警并改变产物，那是"看起来配置了其实没生效"的假象；
+          其他值原样作为 ``palette`` 传入（后端不认识时自行降级并告警）。
+        * ``figures_default_format``：``""`` = 沿用后端默认 ``png``，不传。
+        * ``figures_font_family`` / ``figures_default_journal``：``""`` = 不传。
+        * ``figures_font_size_pt``：``0`` = 沿用后端默认字号，不传。
+        """
+        style: dict[str, Any] = {}
+        palette = config.figures_color_palette.strip()
+        if palette and palette != "default":
+            style["palette"] = palette
+        default_format = config.figures_default_format.strip()
+        if default_format:
+            style["default_format"] = default_format
+        if config.figures_font_family.strip():
+            style["font_family"] = config.figures_font_family.strip()
+        if config.figures_default_journal.strip():
+            style["default_journal"] = config.figures_default_journal.strip()
+        if config.figures_font_size_pt > 0:
+            style["font_size_pt"] = config.figures_font_size_pt
+        return style
+
     def _analyze_dataset(
-        self, project_name: str, data_path: Path | None
+        self,
+        project_name: str,
+        data_path: Path | None,
+        figure_style: dict[str, Any] | None = None,
     ) -> DatasetAnalysis:
         """Run inferential statistics and build figures for the optional dataset.
 
         Statistics and figures are always derived from the same resolved group
         column, so a figure can never illustrate a different grouping than the
         test it accompanies.
+
+        ``figure_style``（来自 ``figures.*``）缺省为空 dict ⇒ 与改动前逐字节一致。
         """
         if data_path is None:
             return DatasetAnalysis()
@@ -1143,7 +1225,11 @@ class ResearchPipeline:
         try:
             with tempfile.TemporaryDirectory(prefix="research-figures-") as temp_dir:
                 bundle = build_figures(
-                    data_path, Path(temp_dir), group_column=group_column, dpi=self.figure_dpi
+                    data_path,
+                    Path(temp_dir),
+                    group_column=group_column,
+                    dpi=self.figure_dpi,
+                    **(figure_style or {}),
                 )
                 result.figures = bundle
                 result.warnings.extend(bundle.warnings)
@@ -1198,7 +1284,11 @@ class ResearchPipeline:
 
     @classmethod
     def _assemble_manuscript(
-        cls, body: str, papers: list[PaperRecord], dataset: DatasetAnalysis
+        cls,
+        body: str,
+        papers: list[PaperRecord],
+        dataset: DatasetAnalysis,
+        style: str = "",
     ) -> str:
         """Append system-generated statistics and figure sections, then references.
 
@@ -1212,7 +1302,7 @@ class ResearchPipeline:
         if dataset.figures is not None and dataset.figures.figures:
             sections.append(cls._figure_section(dataset.figures))
         manuscript = "\n\n".join(section for section in sections if section.strip())
-        return cls._attach_references(manuscript, papers)
+        return cls._attach_references(manuscript, papers, style)
 
     @staticmethod
     def _figure_section(bundle: FigureBundle) -> str:
@@ -1407,6 +1497,9 @@ class ResearchPipeline:
                     claim_report.to_dict() if claim_report is not None else None
                 ),
                 reviewer_count=self.reviewer_count,
+                include_devil_advocate=config.review_include_devil_advocate,
+                consensus_threshold=config.review_consensus_threshold,
+                score_scale=config.review_score_scale,
             )
         except PeerReviewError as exc:
             return None, [], [f"模拟同行评审未执行: {exc}"]
@@ -1475,9 +1568,29 @@ class ResearchPipeline:
             f"{json.dumps(computed, ensure_ascii=False, indent=2) if computed else '无'}"
         )
 
+    #: 文体要求的人类可读描述，用于把 writing.default_paper_type 注入提示词。
+    _PAPER_TYPE_HINTS: ClassVar[dict[str, str]] = {
+        "research_article": "研究论文（research article）",
+        "review": "综述（review）",
+        "letter": "快报/短通讯（letter）",
+        "case_report": "病例/案例报告（case report）",
+        "conference_paper": "会议论文（conference paper）",
+    }
+
     @staticmethod
-    def _writing_system_prompt() -> str:
-        return (
+    def _writing_system_prompt(config: ResearchPipelineConfig) -> str:
+        """构建写作系统提示词。
+
+        ``writing.*`` 的四个键在此参数化，但**缺省时输出与改动前逐字节一致**：
+        这是产物确定性的前提。对完整性约束（不得编造、只能引用给定资料、不得自行
+        生成 References 等系统附加章节）的既有措辞**一个字都不放宽**。
+
+        - ``default_paper_type`` 非空 → 追加文体要求；
+        - ``default_language`` 非空 → 追加正文语言要求；
+        - ``bilingual_abstract`` 为真 → 追加中英双语摘要要求；
+        - ``style_guide`` 非空 → 追加额外风格约束。
+        """
+        base = (
             "你是学术写作助手。请写一份基于文献的研究综述/研究计划草稿，而不是"
             "冒充已经完成的实验论文。不得编造数据、结果、引用或 DOI。正文引用只能使用"
             "[P1]、[P2] 这样的标识，并且只能引用给定资料。明确区分已发表证据、推断和待验证方案。"
@@ -1485,6 +1598,27 @@ class ResearchPipeline:
             "不得自行计算、四舍五入或改写。不要自行生成 References、统计表或图表清单章节，"
             "这些内容由系统附加。请只输出 Markdown 正文。"
         )
+        extras: list[str] = []
+        paper_type = config.writing_paper_type.strip()
+        if paper_type:
+            hint = ResearchPipeline._PAPER_TYPE_HINTS.get(
+                paper_type, paper_type
+            )
+            extras.append(f"文体要求：请按{hint}的体例写作。")
+        language = config.writing_language.strip().lower()
+        if language == "en":
+            extras.append("正文语言要求：请使用英文写作。")
+        elif language == "zh":
+            extras.append("正文语言要求：请使用中文写作。")
+        if config.writing_bilingual_abstract:
+            extras.append("摘要要求：请提供中英双语摘要（先中文后英文）。")
+        style_guide = config.writing_style_guide.strip()
+        if style_guide:
+            extras.append(f"额外风格约束：{style_guide}")
+        if not extras:
+            # 缺省路径：不加任何后缀，保证与改动前逐字节一致。
+            return base
+        return base + "".join(extras)
 
     @staticmethod
     def _writing_user_prompt(
@@ -1575,11 +1709,49 @@ class ResearchPipeline:
         return "\n".join(lines) + "\n"
 
     @staticmethod
-    def _attach_references(body: str, papers: list[PaperRecord]) -> str:
+    def _attach_references(
+        body: str, papers: list[PaperRecord], style: str = ""
+    ) -> str:
+        """装配手稿：正文 + 系统附加的 References 章节。
+
+        参考文献行统一委托给 ``core.citation_styles.render_references``（单一实现，
+        消除双实现漂移），样式为 ``citation_style or "numeric"``——即缺省等价于
+        ``numeric``，输出与改动前**逐字节一致**。委托失败（模块缺失/异常）时回退
+        到本模块的内联基线，绝不因为样式渲染问题破坏交付物。
+        """
         body = body.strip()
         if not body.startswith("#"):
             body = "# Research Draft\n\n" + body
         references = ["## References", ""]
+        references.extend(
+            ResearchPipeline._render_reference_lines(papers, style)
+        )
+        return body + "\n\n" + "\n".join(references) + "\n"
+
+    @staticmethod
+    def _render_reference_lines(
+        papers: list[PaperRecord], style: str
+    ) -> list[str]:
+        """生成参考文献行（统一走 ``citation_styles``，回退内联基线）。
+
+        ``style`` 为空 ⇒ ``numeric``（缺省，与改动前逐字节一致）。任何异常都回退
+        到内联基线——样式渲染是增强项，不能成为交付链路上的新故障点。
+        """
+        effective = style.strip() or "numeric"
+        try:
+            from core import citation_styles
+
+            rendered = citation_styles.render_references(papers, style=effective)
+        except Exception:  # noqa: BLE001 - 回退到内联实现，绝不破坏交付物
+            rendered = None
+        if rendered is not None:
+            return [str(line) for line in rendered]
+        return ResearchPipeline._inline_reference_lines(papers)
+
+    @staticmethod
+    def _inline_reference_lines(papers: list[PaperRecord]) -> list[str]:
+        """引入引用样式之前的参考文献渲染（numeric 基线，逐字节保留）。"""
+        lines: list[str] = []
         for index, paper in enumerate(papers, 1):
             authors = ", ".join(paper.authors[:5])
             if len(paper.authors) > 5:
@@ -1593,8 +1765,8 @@ class ResearchPipeline:
                 citation += f" https://doi.org/{paper.doi}"
             elif paper.url:
                 citation += f" {paper.url}"
-            references.append(citation)
-        return body + "\n\n" + "\n".join(references) + "\n"
+            lines.append(citation)
+        return lines
 
     @staticmethod
     def _presentation_outline(

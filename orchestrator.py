@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from pathlib import Path
 from typing import Any, ClassVar, Literal, cast
 
-from core.artifact_store import ArtifactStore
-from core.export_service import export_pdf, export_pptx
+from core.artifact_store import ArtifactStore, resolve_paths, resolve_repo_path
+from core.config_loader import get_int, get_str, get_str_list, load_settings
+from core.export_service import export_pdf, export_pptx, resolve_export_format
 from core.research_pipeline import PipelineResult
 from core.research_service import ResearchService
 from core.resume import RESUME_STEPS
@@ -22,6 +24,31 @@ from core.state_manager import ProjectState, StateManager, WorkflowStage
 # 类型别名
 ExportFormat = Literal["md", "pdf", "pptx"]
 WorkflowMode = Literal["lightweight", "heavyweight", "hybrid"]
+
+
+def configure_logging(base_dir: Path) -> None:
+    """按 ``logging.*`` 节初始化根 logger（应用入口调用，**唯一入口**）。
+
+    未配置时用 ``DEFAULTS``（level=INFO、既定 format、空 file），因此**空 settings
+    下的日志级别与格式与引入本机制之前一致**；``logging.file`` 为空时不添加文件
+    处理器，保持仅控制台输出。
+
+    本函数只配置根 logger 的级别/格式与（可选）文件处理器，不改动任何既有处理器
+    的类型，也不在 ``file`` 为空时新增处理器——避免"未配置却改变日志行为"。
+    """
+    settings = load_settings(base_dir)
+    level_name = get_str(settings, "logging.level")
+    level = getattr(logging, level_name.upper(), None)
+    if not isinstance(level, int):
+        level = logging.INFO
+    log_format = get_str(settings, "logging.format")
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    log_file = get_str(settings, "logging.file")
+    if log_file:
+        file_path = resolve_repo_path(base_dir, log_file)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(file_path, encoding="utf-8"))
+    logging.basicConfig(level=level, format=log_format, handlers=handlers, force=True)
 
 
 class Orchestrator:
@@ -38,8 +65,20 @@ class Orchestrator:
             base_dir: 项目根目录，默认为当前工作目录。
         """
         self.base_dir = base_dir or Path.cwd()
-        self.projects_dir = self.base_dir / "projects"
+        # 路径由 ``paths.*`` 决定，经**唯一入口** ``resolve_paths`` 解析（相对仓库
+        # 根目录，绝对路径原样）。未配置时逐项回退 DEFAULTS，故与改动前一致。
+        # 这里用 ``load_settings`` 而非 ``load_validated_settings``：构造调度器不应
+        # 因配置非法而崩溃——配置校验的快速失败仍由 ``ResearchService.run`` 负责。
+        settings = load_settings(self.base_dir)
+        self.paths = resolve_paths(self.base_dir, settings)
+        self.projects_dir = self.paths["projects_dir"]
+        self.output_dir = self.paths["output_dir"]
+        self.scripts_dir = self.paths["scripts_dir"]
         self.projects_dir.mkdir(parents=True, exist_ok=True)
+        # 导出配置：``export.default_format`` 作未指定时的默认；
+        # ``citation.export_formats`` 作导出白名单（真实生效于 ``export()``）。
+        self.export_default_format = get_str(settings, "export.default_format")
+        self.export_formats = get_str_list(settings, "citation.export_formats")
 
         self.state_manager = StateManager(self.projects_dir)
         self.artifact_store = ArtifactStore(self.projects_dir)
@@ -233,45 +272,61 @@ class Orchestrator:
     def export(
         self,
         project_name: str,
-        format: ExportFormat = "md",
+        format: ExportFormat | None = None,
         output_path: Path | None = None,
     ) -> Path:
         """导出项目产出物。
 
         Args:
             project_name: 项目名称。
-            format: 导出格式 (md/pdf/pptx)。
-            output_path: 输出路径，默认为项目目录下的 exports/。
+            format: 导出格式 (md/pdf/pptx)。为 None 时依次回退到
+                ``export.default_format``（settings.yaml）与历史默认 ``md``。
+            output_path: 输出路径。为 None 时用默认位置（``projects/<项目>/exports``，
+                与改动前一致，Web 下载端点依赖它）。相对路径以 ``paths.output_dir``
+                为根解析；绝对路径原样使用。
 
         Returns:
             导出文件路径。
 
         Raises:
             FileNotFoundError: 项目不存在。
-            ValueError: 不支持的导出格式。
+            ValueError: 不支持的导出格式，或格式不在 ``citation.export_formats`` 白名单内。
         """
         state = self.state_manager.load(project_name)
         if state is None:
             raise FileNotFoundError(f"项目 '{project_name}' 不存在")
 
+        # 解析实际格式：显式请求 > export.default_format > "md"；并把
+        # citation.export_formats 作为白名单（真实生效点）。未配置时二者都回退
+        # DEFAULTS，行为与改动前一致（md 默认、md/pdf/pptx 全部允许）。
+        resolved = resolve_export_format(
+            format,
+            configured_default=self.export_default_format,
+            allowed_formats=self.export_formats,
+        )
+
         if output_path is None:
             output_path = self.projects_dir / project_name / "exports"
+        elif not output_path.is_absolute():
+            # 相对输出目录以配置的 ``paths.output_dir`` 为根解析；未配置时回退到
+            # DEFAULTS 的 "output"（相对仓库根）。绝对路径原样使用。
+            output_path = self.output_dir / output_path
         output_path.mkdir(parents=True, exist_ok=True)
 
         # 收集所有产出物
         artifacts = self.artifact_store.get_all_artifacts(project_name)
 
         # 根据格式生成导出文件
-        export_file = output_path / f"{project_name}_final.{format}"
+        export_file = output_path / f"{project_name}_final.{resolved}"
 
-        if format == "md":
+        if resolved == "md":
             self._export_markdown(export_file, state, artifacts)
-        elif format == "pdf":
+        elif resolved == "pdf":
             self._export_pdf(export_file, state, artifacts)
-        elif format == "pptx":
+        elif resolved == "pptx":
             self._export_pptx(export_file, state, artifacts)
-        else:
-            raise ValueError(f"不支持的导出格式: {format}")
+        else:  # pragma: no cover - resolve_export_format 已保证只返回已知格式
+            raise ValueError(f"不支持的导出格式: {resolved}")
 
         print(f"[OK] 导出完成: {export_file}")
         return export_file
@@ -350,7 +405,10 @@ class Orchestrator:
         export_pptx(
             outline or manuscript,
             output_path,
-            Path(__file__).parent / "scripts/export_pptx.py",
+            # 脚本路径由 ``paths.scripts_dir`` 决定（未经配置时回退 DEFAULTS
+            # "scripts"，相对仓库根，解析结果与改动前 ``Path(__file__).parent /
+            # "scripts"`` 一致）。
+            self.scripts_dir / "export_pptx.py",
         )
 
 
@@ -398,16 +456,20 @@ def main() -> None:
     )
     research_parser.add_argument(
         "--sources",
-        default="crossref,pubmed,semantic_scholar",
-        help="检索源，逗号分隔",
+        default=None,
+        help=(
+            "检索源，逗号分隔。未指定时读取 config/settings.yaml 的 "
+            "search.default_sources"
+        ),
     )
     research_parser.add_argument(
         "--max-results",
         type=int,
-        default=10,
+        default=None,
         help=(
             "检索结果**总量上限**（不是每个检索源的上限）：各源合计去重后最多保留"
-            "该数量的文献，超出部分按排序依据裁掉（默认: 10）"
+            "该数量的文献，超出部分按排序依据裁掉。未指定时读取 config/settings.yaml "
+            "的 search.max_results"
         ),
     )
     research_parser.add_argument("--data", type=Path, help="可选实验数据 CSV")
@@ -440,8 +502,8 @@ def main() -> None:
     export_parser.add_argument(
         "--format",
         choices=["md", "pdf", "pptx"],
-        default="md",
-        help="导出格式（默认: md）",
+        default=None,
+        help="导出格式。未指定时读取 config/settings.yaml 的 export.default_format",
     )
     export_parser.add_argument(
         "--output",
@@ -455,6 +517,9 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
+    # 应用入口按 logging.* 初始化日志（级别/格式/可选文件）。
+    configure_logging(args.base_dir)
+
     orchestrator = Orchestrator(base_dir=args.base_dir)
 
     try:
@@ -465,11 +530,24 @@ def main() -> None:
                 orchestrator.init_project(args.project_name, args.mode)
             else:
                 print(f"[INFO] 复用已有项目 '{args.project_name}' 并创建新版本产物")
+            # 显式命令行参数优先，缺省时回退到 config/settings.yaml 的 search.*。
+            # （argparse 的 default 留 None，因为解析参数时还没读 settings。）
+            settings = load_settings(args.base_dir)
+            sources = (
+                [item.strip() for item in args.sources.split(",") if item.strip()]
+                if args.sources is not None
+                else get_str_list(settings, "search.default_sources")
+            )
+            max_results = (
+                args.max_results
+                if args.max_results is not None
+                else get_int(settings, "search.max_results")
+            )
             result = orchestrator.run_real_research(
                 args.project_name,
                 args.topic,
-                sources=[item.strip() for item in args.sources.split(",") if item.strip()],
-                max_results=args.max_results,
+                sources=sources,
+                max_results=max_results,
                 data_path=args.data,
                 provider=args.provider,
                 model=args.model,
@@ -494,9 +572,14 @@ def main() -> None:
         elif args.command == "list":
             orchestrator.list_projects()
         elif args.command == "export":
+            # ``--format`` 未指定时为 None，交由 export() 回退到
+            # export.default_format（settings.yaml）或历史默认 md。
+            requested_format = (
+                cast(ExportFormat, args.format) if args.format is not None else None
+            )
             orchestrator.export(
                 args.project_name,
-                cast(ExportFormat, args.format),
+                requested_format,
                 args.output,
             )
     except (FileNotFoundError, FileExistsError, ValueError, RuntimeError) as e:

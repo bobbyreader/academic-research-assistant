@@ -293,6 +293,65 @@ class ArxivSource:
         return results
 
 
+def _normalize_year_range(
+    year_range: tuple[int, int] | list[int] | None,
+) -> tuple[int, int] | None:
+    """归一化年份范围；``None`` 或 ``[0, 0]`` 表示**不过滤**。
+
+    语义（与 ``search.year_range`` 配置一致）：
+
+    * ``None`` / ``[0, 0]`` → 返回 ``None``（不过滤，与改动前逐字节一致）；
+    * 单边为 ``0`` → 该边**不限**（例如 ``[2020, 0]`` 表示"2020 年及以后"，
+      ``[0, 2020]`` 表示"2020 年及以前"）；
+    * 两端都非零 → 必须满足 ``起始 <= 结束``；若反了按**空范围**处理
+      （返回 ``(start, end)`` 原样，过滤器会给所有"年份已知"的文献判为出界，
+      这是明确可见的结果，而不是静默忽略）。
+
+    只接受 2 元序列；其他长度一律抛 ``ValueError``——配置层已做类型校验，
+    这里再严格一次，避免"看起来生效、实际没接上"的第三份语义。
+    """
+    if year_range is None:
+        return None
+    try:
+        values = list(year_range)
+    except TypeError as exc:  # 传入非可迭代对象：明确的编程错误
+        raise ValueError(f"year_range 必须是二元序列，当前为 {year_range!r}") from exc
+    if len(values) != 2:
+        raise ValueError(f"year_range 必须是二元序列，当前为 {year_range!r}")
+    start, end = values
+    if not isinstance(start, int) or isinstance(start, bool):
+        raise TypeError(f"year_range 的起始年必须是整数，当前为 {start!r}")
+    if not isinstance(end, int) or isinstance(end, bool):
+        raise TypeError(f"year_range 的结束年必须是整数，当前为 {end!r}")
+    if start == 0 and end == 0:
+        return None
+    return (start, end)
+
+
+def _in_year_range(year: int | None, bounds: tuple[int, int] | None) -> bool:
+    """``year`` 是否落在 ``bounds`` 内。
+
+    **关键取舍：``year`` 为 ``None`` 时返回 ``True``（保留）。**
+
+    年份缺失是上游元数据不全（预印本、早期记录、接口未回填），**不是**
+    "该文献不在范围内"的证据。过滤掉它们会因一个缺失字段而**静默丢弃真实
+    证据**，这与 Phase 7"宁可多留也不静默丢弃"的原则冲突。因此范围过滤只
+    约束**年份已知**的文献；未知年份的文献被保留，并在
+    :attr:`SearchReport.ranking_reasons` 里显式说明，绝不让用户误以为
+    "范围内只有这些"。
+
+    单边为 0 表示该边不限（见 :func:`_normalize_year_range`）。
+    """
+    if bounds is None:
+        return True
+    if year is None:
+        return True
+    start, end = bounds
+    if start and year < start:
+        return False
+    return not (end and year > end)
+
+
 @dataclass
 class LiteratureSearcher:
     """Run configured sources independently and merge normalized records."""
@@ -324,6 +383,7 @@ class LiteratureSearcher:
         query: str,
         sources: list[str],
         max_results: int,
+        year_range: tuple[int, int] | list[int] | None = None,
     ) -> SearchReport:
         """检索多个来源、去重、按确定性规则排序，并把总量裁剪到 ``max_results``。
 
@@ -355,6 +415,20 @@ class LiteratureSearcher:
         ``sources`` 顺序无关。"标题归一化后相同但旁证不足"的记录**保留为多条**，
         并记入 :attr:`SearchReport.ranking_reasons`（绝不静默丢弃）。
 
+        **年份过滤（``year_range``）**：``[起始年, 结束年]``，``0`` 表示**该边
+        不限**，``None`` / ``[0, 0]`` 表示**不过滤**（此时行为与引入该参数之前
+        逐字节一致）。语义细节见 :func:`_in_year_range`：
+
+        * **过滤发生在排序之后、总量裁剪之前**。理由：排序是去重候选**集合**
+          的纯函数，与年份无关；把过滤放在排序之后，既保证默认（不过滤）时
+          排序结果逐字节不变，也保证过滤后的保留顺序仍是"排序结果的子序列"
+          ——即文献集合的纯函数，与来源顺序无关。若放在排序之前，虽然结果
+          相同，但会让"排序输入规模"随范围变化，掩盖 Phase 7 已有的确定性保证。
+        * **``year`` 为 ``None`` 的文献被保留**（见 :func:`_in_year_range`）：
+          年份缺失不等于"不在范围内"，丢弃它们会因一个缺失字段而静默丢证据。
+        * 被排除的条数进入 :attr:`SearchReport.excluded_by_year`（绝不静默），
+          并在排序依据里说明；单边/无年份保留情况也会显式记入。
+
         既有契约不变：:class:`SearchReport` 的 ``papers`` / ``errors`` /
         ``sources_attempted`` / ``counts_by_source`` 语义与类型保持原样，新增字段
         均带默认值。
@@ -365,6 +439,10 @@ class LiteratureSearcher:
             raise ValueError("max_results 必须大于 0")
         if len(sources) == 0:
             raise ValueError("sources 不能为空")
+
+        # 年份范围在此处归一化并**尽早失败**：非法形状/类型是编程错误，不应在
+        # 完成一次真实联网检索之后才暴露。
+        year_bounds = _normalize_year_range(year_range)
 
         # 保序去重来源名：重名不再重复检索，保证 counts_by_source 与 total_found 自洽
         # （否则同名键互相覆盖，sum(counts) != total_found）。
@@ -405,15 +483,43 @@ class LiteratureSearcher:
 
         ranked = rank_candidates(candidates, topic=query)
 
-        kept = ranked[:max_results]
-        dropped_by_limit = len(ranked) - len(kept)
+        # 年份过滤发生在**排序之后、总量裁剪之前**：排序仍是"去重候选集合"的
+        # 纯函数（与年份无关），过滤只是从有序序列里剔除不满足年份谓词的条目，
+        # 保留顺序因此仍是文献集合的纯函数，与来源顺序无关。bounds 为 None 时
+        # 该分支不改变任何行为（逐字节与改动前一致）。
+        if year_bounds is None:
+            in_range = ranked
+        else:
+            in_range = [
+                item
+                for item in ranked
+                if _in_year_range(item.paper.year, year_bounds)
+            ]
+        excluded_by_year = len(ranked) - len(in_range)
+
+        kept = in_range[:max_results]
+        dropped_by_limit = len(in_range) - len(kept)
 
         ranking_reasons: list[str] = []
         ranking_reasons.extend(dedup.kept_separate)
-        if ranked:
+        if year_bounds is not None:
+            start, end = year_bounds
+            if excluded_by_year:
+                ranking_reasons.append(
+                    f"年份范围过滤：范围 [{start or '不限'}, {end or '不限'}] 排除了 "
+                    f"{excluded_by_year} 篇**年份已知且落在范围外**的文献（绝不静默丢弃）。"
+                )
+            kept_unknown = sum(1 for item in in_range if item.paper.year is None)
+            if kept_unknown:
+                ranking_reasons.append(
+                    f"年份范围过滤：保留 {kept_unknown} 篇**年份未知**（``year`` 为空）"
+                    "的文献——年份缺失不是'不在范围内'的证据，丢弃它们会因缺失字段"
+                    "而丢证据。"
+                )
+        if in_range:
             ranking_reasons.append(
                 f"排序依据（高→低）：多源命中数、主题词项重合、引用数、年份新近；"
-                f"共 {len(ranked)} 篇去重候选，保留前 {len(kept)} 篇"
+                f"共 {len(in_range)} 篇范围内候选，保留前 {len(kept)} 篇"
                 f"（总量上限 {max_results}，单源预算 {per_source_budget}）。"
             )
             for position, item in enumerate(kept, start=1):
@@ -430,5 +536,6 @@ class LiteratureSearcher:
             total_found=total_found,
             deduplicated_count=len(candidates),
             dropped_by_limit=dropped_by_limit,
+            excluded_by_year=excluded_by_year,
             ranking_reasons=ranking_reasons,
         )

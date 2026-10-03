@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 from core.artifact_store import ArtifactStore
+from core.config_loader import (
+    get_bool,
+    get_float,
+    get_int,
+    get_int_pair,
+    get_str,
+)
 from core.config_validation import ConfigValidationError, load_validated_settings
 from core.external_clients import LiteratureSearcher
 from core.llm_client import build_llm_client
@@ -81,22 +90,19 @@ class ResearchService:
             }
         )
         self.state_manager.save(state)
-        llm_settings = runtime_settings.get("llm", {})
-        api_settings = runtime_settings.get("api_keys", {})
+        settings: Mapping[str, Any] = runtime_settings
+        # 配置警告必须**可见**：非阻断性问题（未知键、缺失配置文件等）不得被静默
+        # 吞掉，否则用户会以为"配置生效了"。这里如实逐条记录到应用日志。
+        for warning in validation.warnings:
+            logging.getLogger(__name__).warning("配置警告：%s", warning)
+        llm_settings = settings.get("llm", {})
+        api_settings = settings.get("api_keys", {})
         if not isinstance(api_settings, dict):
             api_settings = {}
-        review_settings = runtime_settings.get("review", {})
-        reviewer_count = (
-            int(review_settings.get("reviewer_count", 1))
-            if isinstance(review_settings, dict)
-            else 1
-        )
-        figure_settings = runtime_settings.get("figures", {})
-        figure_dpi = (
-            int(figure_settings.get("default_dpi", 300))
-            if isinstance(figure_settings, dict)
-            else 300
-        )
+        # review.* / figures.* 一律经 config_loader 的取值接口读取（默认值只在
+        # DEFAULTS 一处定义，不自造）：未配置时逐项回退到与改动前相同的默认值。
+        reviewer_count = get_int(settings, "review.reviewer_count")
+        figure_dpi = get_int(settings, "figures.default_dpi")
         configured_timeout = (
             llm_settings.get("timeout_seconds") if isinstance(llm_settings, dict) else None
         )
@@ -115,12 +121,45 @@ class ResearchService:
             else os.getenv("GEMINI_MODEL")
         ) or configured_model
         selected_base_url = base_url or os.getenv("ARS_LLM_BASE_URL") or configured_base_url
+        # ------------------------------------------------------------------ #
+        # 各节配置：一律经 config_loader 取值接口读取。默认值只在 DEFAULTS 一处
+        # 定义（不自造），未配置时逐项回退到与改动前相同的默认值。这些值同时用于
+        # (a) 参与续跑指纹，(b) 显式传给下游（这是既有模式：reviewer_count / figure_dpi）。
+        # ------------------------------------------------------------------ #
+        search_year_range = get_int_pair(settings, "search.year_range")
+        figures_default_journal = get_str(settings, "figures.default_journal")
+        figures_default_format = get_str(settings, "figures.default_format")
+        figures_color_palette = get_str(settings, "figures.color_palette")
+        figures_font_family = get_str(settings, "figures.font_family")
+        figures_font_size_pt = get_int(settings, "figures.font_size_pt")
+        writing_paper_type = get_str(settings, "writing.default_paper_type")
+        writing_language = get_str(settings, "writing.default_language")
+        writing_bilingual_abstract = get_bool(settings, "writing.bilingual_abstract")
+        writing_style_guide = get_str(settings, "writing.style_guide")
+        citation_style = get_str(settings, "citation.default_style")
+        review_include_devil_advocate = get_bool(
+            settings, "review.include_devil_advocate"
+        )
+        # 浮点键必须用 get_float：get_int 会把 0.6 抹成 0（"看起来配了、实际没生效"）。
+        review_consensus_threshold = get_float(
+            settings, "review.consensus_threshold"
+        )
+        review_score_scale = get_str(settings, "review.score_scale")
+        export_default_format = get_str(settings, "export.default_format")
+        export_pdf_engine = get_str(settings, "export.pdf_engine")
+        export_pptx_template = get_str(settings, "export.pptx_template")
+        export_include_speaker_notes = get_bool(settings, "export.include_speaker_notes")
         active_stage = WorkflowStage.SEARCH
         state.stage_status[WorkflowStage.BRAINSTORMING] = "completed"
         state.stage_status[WorkflowStage.SEARCH] = "in_progress"
 
         # 本次运行的输入指纹。它与"上一次运行记录下来的分阶段指纹"一起决定哪些
         # 阶段可以安全跳过（见 core/resume.py 的第一性原理）。
+        #
+        # 关键：**任何影响某阶段输出的配置都必须进指纹**。否则用户改了"撰写语言"
+        # 或"引用样式"后重跑，系统会复用旧设置下产出的手稿并报告"复用了全部阶段"
+        # ——那是一句谎，且用户看不出来。分组语义由 core/resume.py 负责，这里只需
+        # 如实把值传进去。
         fingerprint = RunFingerprint.build(
             topic=topic,
             sources=sources,
@@ -128,6 +167,20 @@ class ResearchService:
             data_path=data_path,
             reviewer_count=reviewer_count,
             figure_dpi=figure_dpi,
+            search_year_range=search_year_range,
+            figures_default_journal=figures_default_journal,
+            figures_default_format=figures_default_format,
+            figures_color_palette=figures_color_palette,
+            figures_font_family=figures_font_family,
+            figures_font_size_pt=figures_font_size_pt,
+            writing_paper_type=writing_paper_type,
+            writing_language=writing_language,
+            writing_bilingual_abstract=writing_bilingual_abstract,
+            writing_style_guide=writing_style_guide,
+            citation_style=citation_style,
+            review_include_devil_advocate=review_include_devil_advocate,
+            review_consensus_threshold=review_consensus_threshold,
+            review_score_scale=review_score_scale,
         )
         previous_steps = parse_recorded_steps(state.metadata.get(COMPLETED_STEPS_KEY))
         decision = plan_resume(
@@ -209,6 +262,25 @@ class ResearchService:
                     sources=sources,
                     max_results=max_results,
                     data_path=data_path,
+                    # 显式传值给下游（既有模式）：字段名与 delivery-dev 冻结的一致。
+                    writing_paper_type=writing_paper_type,
+                    writing_language=writing_language,
+                    writing_bilingual_abstract=writing_bilingual_abstract,
+                    writing_style_guide=writing_style_guide,
+                    citation_style=citation_style,
+                    figures_default_journal=figures_default_journal,
+                    figures_default_format=figures_default_format,
+                    figures_color_palette=figures_color_palette,
+                    figures_font_family=figures_font_family,
+                    figures_font_size_pt=figures_font_size_pt,
+                    review_include_devil_advocate=review_include_devil_advocate,
+                    review_consensus_threshold=review_consensus_threshold,
+                    review_score_scale=review_score_scale,
+                    export_default_format=export_default_format,
+                    export_pdf_engine=export_pdf_engine,
+                    export_pptx_template=export_pptx_template,
+                    export_include_speaker_notes=export_include_speaker_notes,
+                    search_year_range=search_year_range,
                 )
             )
         except ResearchPipelineCancelled:

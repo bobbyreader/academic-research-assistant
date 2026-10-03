@@ -1,8 +1,117 @@
 # 全局设置
 #
-# 本文件只保留**当前有代码读取**的配置项。未被任何代码路径读取的键会在这里
-# 误导用户（宣称可配置，实则无效），因此已删除；计划中的键移至 ROADMAP.md
-# 的“计划中的配置项”一节，待实现后再移回此处。
+# 本文件中的每一个键都**已被代码读取**。绝大多数键经 core/config_loader.py 的
+# get_* 访问器读取，其默认值集中定义在 DEFAULTS 中（由测试钉死以防漂移）。
+#
+# **例外：`llm.*` 与 `api_keys.*` 不经 `DEFAULTS`，由代码直接读取**（core/research_service
+# 与 core/llm_client 用原始 dict 访问），因此它们的"未配置行为"由**代码**定义，而非
+# 本文件或 DEFAULTS。特别注意：`llm.provider` 未配置时**真实回退是 `gemini`**
+# （见 core/llm_client.build_llm_client），**不是** `codex_cli`。请勿在此臆造它们的默认值。
+#
+# 请放心修改此处取值；若新增未被读取的键，会在校验阶段产生 warning（不阻断运行）
+# 并提示"已忽略"。
+#
+# 【默认值的判定规则】**配置里 shipped 的默认值 = 改动前代码的硬编码行为。**
+# 即：用户**不改配置**时，产物必须与引入配置机制之前逐字节一致。默认值描述的是
+# "当前实际行为"，不是"我们希望的默认"。例：figures.default_dpi: 300（硬编码 300）✓、
+# review.reviewer_count: 1（硬编码 1）✓；而"默认写演讲者备注"✗（现状不写）故为 false。
+#
+# 以下五项配置**不在此处开放**，请不要添加。各自理由不同，分别说明：
+#
+# 1) integrity.*：**刻意不提供开关**（核心承诺）。两个硬阻断关口永久硬编码，
+#    任何情况下都不允许用户关闭——这是本项目的安全底线，不是"尚未实现"。
+# 2) api_keys.scopus_key / api_keys.elsevier_key：**需新增检索源，故不接回**。
+#    这两个键只有在引入 Scopus / Elsevier 检索源后才有意义，与 Phase 7 的
+#    检索源决定一致；目前加入只会造成"配了却不生效"。属于"功能未到、暂不开放"。
+# 3) search.deduplication_fields：**不可配置**（正确性关键）。Phase 7 的去重包含
+#    "旁证"规则，若开放开关，用户可把不同论文误合并；因此固定内置，不暴露。
+# 4) paths.templates_dir：**暂不提供**（功能未到、暂不开放）。templates/ 目录当前
+#    全项目零消费者，接入它需要先把模板真正用于手稿/回信生成（属新功能），故不在
+#    此开放该键；未被读取的键只会误导用户。
+# 5) citation.supported_styles：**暂不开放**（功能未到、暂不开放）。"哪些引用样式
+#    被支持"是**代码能力事实**（单一来源 core/citation_styles.known_styles()），不是
+#    用户偏好；放进配置会让用户误以为"写上 vancouver 就能用"。支持样式以代码为准，
+#    default_style 的合法性由校验对照该单一来源判定。
+#
+# 换言之：1) 是"永不开放"，3) 是"永不开放"，2)/4)/5) 是"暂不开放（待功能就绪）"。
+#
+# 另：`citation.export_formats` 是**导出白名单**，且必须包含 `export.default_format`
+#    （否则每次导出都会运行时失败，故在校验期即硬阻断）。
+
+# 目录设置
+#
+# 注意：三个键**性质不同，相对路径的锚点也不同**，不是统一的"项目根目录"：
+#   - projects_dir / output_dir：**用户数据**，相对路径锚定**运行目录**
+#     （即 Orchestrator(base_dir=...) / create_app(base_dir) 传入的目录）。
+#   - scripts_dir：**随代码发布的资产**，相对路径锚定**包根目录**（代码所在位置），
+#     以保证无论从哪个 cwd 启动都能找到。
+# 绝对路径一律原样使用，不受上述锚点影响。
+paths:
+  projects_dir: "projects"  # 用户数据：研究项目的工作目录（相对路径锚定运行目录）
+  output_dir: "output"  # 用户数据：导出产物目录（相对路径锚定运行目录）
+  scripts_dir: "scripts"  # 代码资产：辅助脚本目录，如 PPTX 导出脚本（相对路径锚定包根目录）
+
+# 检索设置
+search:
+  default_sources:  # 默认检索源（未知源会被校验拦截）
+    - "crossref"
+    - "pubmed"
+    - "semantic_scholar"
+  max_results: 10  # **总量上限**：所有检索源合并后的最大文献条数（非每源上限）
+  year_range: [0, 0]  # 年份过滤 [起始年, 结束年]；**0 表示不限**，[0, 0] 即不过滤
+
+# 引用设置
+citation:
+  default_style: "numeric"  # 作用于**参考文献列表**：numeric=编号制、author_year=作者—年份制。
+                            # 正文内联标记**固定为 [Pn]**，不受此项影响——确定性引用
+                            # 核验关口（citation_verifier）依赖该格式识别标记，因此内联
+                            # 标记不接受配置。选 author_year 只改变参考文献列表的渲染。
+                            # 支持的样式以代码为准（core.citation_styles.known_styles()），
+                            # 不作为配置键开放。
+  export_formats:  # 导出白名单：仅这些格式可被导出层接受（未知格式名会被校验拦截）
+    - "md"
+    - "pdf"
+    - "pptx"
+
+# 写作设置
+writing:
+  default_paper_type: ""  # 留空 = 不追加文体约束，沿用既有提示词（当前为中文研究论文体例）；
+                          # 可显式设为 research_article / review / letter 等以覆盖
+  default_language: ""  # 留空 = 不追加语言约束，沿用既有提示词（当前为中文）；
+                        # 可显式设为 zh 或 en 以覆盖
+  bilingual_abstract: false  # 是否生成中英双语摘要
+  style_guide: ""  # 写作风格指南文本；留空表示不启用
+
+# 导出设置
+export:
+  default_format: "md"  # 默认导出格式：md、pdf 或 pptx
+  pdf_engine: "auto"  # PDF 引擎：auto、pandoc 或 reportlab（auto 自动择优）
+  pptx_template: ""  # PPTX 模板路径；留空表示使用内置默认模板
+  include_speaker_notes: false  # 默认 false = 保持既有行为（不写演讲者备注）；
+                                # 置 true 才会为每张幻灯片补一行 Notes（确定性生成）
+
+# 日志设置
+logging:
+  level: "INFO"  # 日志级别（大小写不敏感）：CRITICAL/ERROR/WARNING/INFO/DEBUG/NOTSET
+  format: "%(asctime)s %(levelname)s %(name)s: %(message)s"  # 日志格式化模板
+  file: ""  # 日志文件路径；留空表示只输出到控制台
+
+# 图表设置
+figures:
+  default_dpi: 300  # 出版级图表分辨率
+  default_journal: ""  # 目标期刊名；留空表示未指定（影响尺寸/字号建议）
+  default_format: "png"  # 图表默认格式：png、pdf 或 svg
+  color_palette: "default"  # 配色方案名称
+  font_family: ""  # 字体族；留空表示使用库默认字体
+  font_size_pt: 10  # 图表字号（磅）
+
+# 审稿设置
+review:
+  reviewer_count: 1  # 模拟审稿人数量（**0 = 关闭评审阶段**）；每增加一位多一次 LLM 调用
+  include_devil_advocate: false  # 是否启用"魔鬼代言人"（专门挑刺）审稿人
+  consensus_threshold: 0.0  # **0 = 不标注分歧（保持既有行为）**；>0 才启用分歧标注
+                            # （一致度低于该阈值时在综合意见前置说明）。取值 [0, 1]
+  score_scale: "0-100"  # 评分刻度描述
 
 # API 配置（请替换为实际密钥）
 api_keys:
@@ -16,11 +125,3 @@ llm:
   model: ""  # 留空则使用本机 Codex CLI 的默认模型
   base_url: ""  # 留空则使用对应 provider 的默认地址
   timeout_seconds: 120  # 单次 LLM 请求超时（秒）
-
-# 图表设置
-figures:
-  default_dpi: 300  # 出版级图表分辨率
-
-# 审稿设置
-review:
-  reviewer_count: 1  # 模拟审稿人数量（0 = 关闭评审阶段）；每增加一位多一次 LLM 调用

@@ -33,11 +33,17 @@ class FakeResolver:
 
 class FakeSearcher:
     def search(
-        self, query: str, sources: list[str], max_results: int
+        self,
+        query: str,
+        sources: list[str],
+        max_results: int,
+        year_range: tuple[int, int] | list[int] | None = None,
     ) -> SearchReport:
         assert query == "climate adaptation"
         assert sources == ["crossref"]
         assert max_results == 2
+        # 缺省年份窗口 (0, 0) 必须原样透传（= 不过滤，与改动前一致）。
+        assert year_range == (0, 0)
         return SearchReport(
             papers=[
                 PaperRecord(
@@ -989,10 +995,14 @@ class CountingSearcher(FakeSearcher):
         self.calls = 0
 
     def search(
-        self, query: str, sources: list[str], max_results: int
+        self,
+        query: str,
+        sources: list[str],
+        max_results: int,
+        year_range: tuple[int, int] | list[int] | None = None,
     ) -> SearchReport:
         self.calls += 1
-        return super().search(query, sources, max_results)
+        return super().search(query, sources, max_results, year_range=year_range)
 
 
 class CountingLLM(FakeLLM):
@@ -1610,3 +1620,606 @@ def test_advisory_gate_failure_still_persists_and_enables_resume(
         "关口抛错后 writing 阶段仍必须可复用（产物已如实落盘）"
     )
     assert set(decision.reusable) == set(RESUME_STEPS)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8 交付层：writing.* / review.* / export.* / citation_style 真实生效
+# --------------------------------------------------------------------------- #
+
+#: 引入参数化之前的写作系统提示词逐字文本——所有"缺省不变"断言的基线。
+_BASELINE_WRITING_SYSTEM_PROMPT = (
+    "你是学术写作助手。请写一份基于文献的研究综述/研究计划草稿，而不是"
+    "冒充已经完成的实验论文。不得编造数据、结果、引用或 DOI。正文引用只能使用"
+    "[P1]、[P2] 这样的标识，并且只能引用给定资料。明确区分已发表证据、推断和待验证方案。"
+    "如果系统提供了已计算的统计结果，只能原样引用其中的数值（p 值、效应量、n），"
+    "不得自行计算、四舍五入或改写。不要自行生成 References、统计表或图表清单章节，"
+    "这些内容由系统附加。请只输出 Markdown 正文。"
+)
+
+
+def _config(**overrides: object) -> ResearchPipelineConfig:
+    base: dict[str, object] = {
+        "project_name": "cfg",
+        "topic": "climate adaptation",
+        "sources": ["crossref"],
+        "max_results": 2,
+    }
+    base.update(overrides)
+    return ResearchPipelineConfig(**base)  # type: ignore[arg-type]
+
+
+def test_writing_prompt_is_byte_identical_when_keys_default() -> None:
+    """所有 writing.* 键缺省时，写作提示词必须与改动前**逐字节**一致。"""
+    prompt = ResearchPipeline._writing_system_prompt(_config())
+
+    assert prompt == _BASELINE_WRITING_SYSTEM_PROMPT
+
+
+def test_writing_paper_type_language_abstract_style_change_prompt() -> None:
+    """四个 writing.* 键都必须真实改变提示词，而非"读了没用"。"""
+    prompt = ResearchPipeline._writing_system_prompt(
+        _config(
+            writing_paper_type="review",
+            writing_language="en",
+            writing_bilingual_abstract=True,
+            writing_style_guide="避免使用第一人称",
+        )
+    )
+
+    assert prompt != _BASELINE_WRITING_SYSTEM_PROMPT
+    assert "综述" in prompt  # paper type
+    assert "英文" in prompt  # language
+    assert "中英双语摘要" in prompt  # bilingual abstract
+    assert "避免使用第一人称" in prompt  # style guide
+    # 完整性约束一个字都不能弱化。
+    assert "不得编造数据、结果、引用或 DOI" in prompt
+    assert "只能引用给定资料" in prompt
+
+
+def test_writing_system_prompt_reaches_the_model(tmp_path: Path) -> None:
+    """写入配置后，真实链路里传给模型的系统提示词必须真的带上这些约束。"""
+    seen: dict[str, str] = {}
+
+    class RecordingLLM(FakeLLM):
+        def complete(self, system_prompt: str, user_prompt: str) -> str:
+            seen["system"] = system_prompt
+            return super().complete(system_prompt, user_prompt)
+
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=RecordingLLM(),
+        doi_resolver=FakeResolver(),
+        reviewer_count=0,
+    )
+    pipeline.run(
+        _config(
+            project_name="writing-cfg",
+            writing_paper_type="letter",
+            writing_bilingual_abstract=True,
+        )
+    )
+
+    assert "快报" in seen["system"]
+    assert "中英双语摘要" in seen["system"]
+
+
+def test_review_devil_advocate_instruction_appears_in_prompt(tmp_path: Path) -> None:
+    """include_devil_advocate=True 时审稿人提示词必须要求一条明确的反对意见。"""
+    prompts: list[str] = []
+
+    class RecordingLLM(FakeLLM):
+        def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+            if "审稿人" in system_prompt:
+                prompts.append(user_prompt)
+            return super().complete_json(system_prompt, user_prompt)
+
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=RecordingLLM(),
+        doi_resolver=FakeResolver(),
+        reviewer_count=1,
+    )
+    pipeline.run(
+        _config(project_name="devil", review_include_devil_advocate=True)
+    )
+
+    assert prompts, "the reviewer must have been called"
+    assert "反对意见" in prompts[0]
+
+
+def test_review_default_has_no_devil_advocate_text() -> None:
+    """缺省时提示词中不得出现反对意见要求（逐字节一致的必要条件）。"""
+    from core.peer_reviewer import _build_user_prompt
+
+    prompt = _build_user_prompt(
+        role="methodology",
+        topic="t",
+        manuscript_body="body",
+        citation_verification={},
+        statistics_verification={},
+        statistics_report={},
+        claim_verification={},
+    )
+    assert "反对意见" not in prompt
+    assert '"score": 0-100' in prompt
+
+
+def test_review_consensus_threshold_flags_divergence(tmp_path: Path) -> None:
+    """consensus_threshold 必须真实生效：分歧时综合意见里标注"评审意见分歧"。"""
+    class DivergingLLM(FakeLLM):
+        def __init__(self, body: str | None = None) -> None:
+            super().__init__(body=body or "# Climate adaptation\n\n## Abstract\nA grounded draft.")
+
+        def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+            payload = super().complete_json(system_prompt, user_prompt)
+            # 第 3 位角色（novelty）给出不同的建议 → 3 人中 2 人一致 = 0.67。
+            if "审稿人" in system_prompt and "你的审稿角色：novelty" in user_prompt:
+                payload = dict(payload, recommendation="reject")
+            return payload
+
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=DivergingLLM(),
+        doi_resolver=FakeResolver(),
+        reviewer_count=3,
+    )
+    result = pipeline.run(
+        _config(project_name="diverge", review_consensus_threshold=0.9)
+    )
+
+    assert result.review is not None
+    assert "评审意见分歧" in result.review.synthesis
+
+
+def test_review_consensus_threshold_default_does_not_flag(tmp_path: Path) -> None:
+    """缺省阈值 0.0 时永不标注分歧——保证综合意见与改动前逐字节一致。"""
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(),
+        doi_resolver=FakeResolver(),
+        reviewer_count=3,
+    )
+    result = pipeline.run(_config(project_name="nodiverge"))
+
+    assert result.review is not None
+    assert "评审意见分歧" not in result.review.synthesis
+
+
+def test_review_score_scale_appears_in_prompt_and_artifact(tmp_path: Path) -> None:
+    """score_scale 必须同时影响提示词刻度与落盘 Markdown 的刻度标注。"""
+    prompts: list[str] = []
+
+    class RecordingLLM(FakeLLM):
+        def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+            if "审稿人" in system_prompt:
+                prompts.append(user_prompt)
+            return super().complete_json(system_prompt, user_prompt)
+
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=RecordingLLM(),
+        doi_resolver=FakeResolver(),
+        reviewer_count=1,
+    )
+    pipeline.run(_config(project_name="scale", review_score_scale="0-10"))
+
+    assert prompts and '"score": 0-10' in prompts[0]
+    markdown = (
+        tmp_path / "projects/scale/artifacts/review/review_reports.md.v1"
+    ).read_text(encoding="utf-8")
+    assert "评分: 65/10" in markdown
+
+    payload = json.loads(
+        (tmp_path / "projects/scale/artifacts/review/review_reports.json.v1").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["score_scale"] == "0-10"
+
+
+def test_review_default_score_scale_markdown_is_byte_identical(tmp_path: Path) -> None:
+    """缺省 score_scale 时评审 Markdown 的评分标注仍为 ``/100``。"""
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(),
+        doi_resolver=FakeResolver(),
+        reviewer_count=1,
+    )
+    pipeline.run(_config(project_name="scale-default"))
+
+    markdown = (
+        tmp_path / "projects/scale-default/artifacts/review/review_reports.md.v1"
+    ).read_text(encoding="utf-8")
+    assert "评分: 65/100" in markdown
+
+
+# ------------------------------------------------------------------------------------- #
+# export.* 生效
+# ------------------------------------------------------------------------------------- #
+def test_export_resolve_format_prefers_requested_then_default() -> None:
+    from core.export_service import ExportError, resolve_export_format
+
+    assert resolve_export_format("pdf", "md") == "pdf"
+    assert resolve_export_format("", "pptx") == "pptx"
+    assert resolve_export_format("", "") == "md"  # 历史行为
+    with pytest.raises(ExportError):
+        resolve_export_format("docx", "md")
+
+
+def test_export_whitelist_rejects_format_outside_citation_export_formats() -> None:
+    """`citation.export_formats: [pdf]` + 请求 `pptx` → 抛错且点名叫出该配置。"""
+    from core.export_service import ExportError, resolve_export_format
+
+    with pytest.raises(ExportError) as excinfo:
+        resolve_export_format("pptx", "md", allowed_formats=["pdf"])
+
+    message = str(excinfo.value)
+    assert "citation.export_formats" in message, "错误消息必须点名叫出该配置项"
+    assert "pptx" in message, "错误消息必须点名被拒的具体格式"
+
+
+def test_export_whitelist_permits_format_in_list() -> None:
+    """白名单内的格式正常通过；空列表视作不限制。"""
+    from core.export_service import resolve_export_format
+
+    assert resolve_export_format("pdf", "md", allowed_formats=["pdf", "md"]) == "pdf"
+    # 空列表不构成白名单（避免"配置成空 = 全部禁止"这种反直觉行为）。
+    assert resolve_export_format("pdf", "md", allowed_formats=[]) == "pdf"
+
+
+def test_export_whitelist_none_does_not_constrain_and_is_unchanged() -> None:
+    """未配置（allowed_formats=None）时不施加任何限制，行为与改动前一致。"""
+    from core.export_service import resolve_export_format
+
+    assert resolve_export_format("pdf", "md", allowed_formats=None) == "pdf"
+    assert resolve_export_format("pptx", "") == "pptx"  # 缺省参数不限制
+    assert resolve_export_format("", "pdf") == "pdf"
+
+
+def test_export_pdf_engine_reportlab_forces_python_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """engine=reportlab 必须跳过 pandoc，即便它在 PATH 中。"""
+    from core import export_service
+
+    called: list[str] = []
+    monkeypatch.setattr(export_service.shutil, "which", lambda _n: "/usr/bin/pandoc")
+
+    def fake_run(*args: object, **kwargs: object) -> object:
+        called.append("pandoc")
+        raise AssertionError("engine=reportlab 不得调用 pandoc")
+
+    monkeypatch.setattr(export_service.subprocess, "run", fake_run)
+    markdown = tmp_path / "m.md"
+    markdown.write_text("# T\n\n- a\n", encoding="utf-8")
+
+    pdf = export_service.export_pdf(markdown, tmp_path / "o.pdf", engine="reportlab")
+
+    assert called == []
+    assert pdf.read_bytes().startswith(b"%PDF")
+
+
+def test_export_pdf_engine_pandoc_fails_loudly_when_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """engine=pandoc 且工具缺失时必须显式失败，绝不静默回退 reportlab。"""
+    from core import export_service
+
+    monkeypatch.setattr(export_service.shutil, "which", lambda _n: None)
+    markdown = tmp_path / "m.md"
+    markdown.write_text("# T\n", encoding="utf-8")
+
+    with pytest.raises(export_service.ExportError, match="pandoc"):
+        export_service.export_pdf(markdown, tmp_path / "o.pdf", engine="pandoc")
+
+
+def test_export_pdf_default_engine_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """缺省 engine=auto 时行为与改动前一致：无系统后端时 reportlab 兜底。"""
+    from core import export_service
+
+    monkeypatch.setattr(export_service.shutil, "which", lambda _n: None)
+    markdown = tmp_path / "m.md"
+    markdown.write_text("# T\n\n- a\n", encoding="utf-8")
+
+    pdf = export_service.export_pdf(markdown, tmp_path / "o.pdf")
+
+    assert pdf.read_bytes().startswith(b"%PDF")
+
+
+def test_export_pptx_template_and_speaker_notes_effective(tmp_path: Path) -> None:
+    """pptx_template 与 include_speaker_notes 必须真实进入导出脚本调用。"""
+    from core.export_service import export_pptx
+
+    script = tmp_path / "fake_pptx.py"
+    script.write_text(
+        "import argparse, pathlib, sys\n"
+        "p = argparse.ArgumentParser()\n"
+        "p.add_argument('input'); p.add_argument('--output'); p.add_argument('--template')\n"
+        "a = p.parse_args()\n"
+        "pathlib.Path(a.output).write_bytes(b'PK')\n"
+        "pathlib.Path(str(a.output) + '.args').write_text(\n"
+        "    (str(a.template) if a.template else '') + '|' + pathlib.Path(a.input).read_text(encoding='utf-8')\n"
+        ", encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    markdown = tmp_path / "outline.md"
+    markdown.write_text("# Slide\n- point one\n- point two\n---\n# Second\n- x\n", encoding="utf-8")
+    template = tmp_path / "t.pptx"
+    template.write_bytes(b"PK")
+
+    out = export_pptx(
+        markdown,
+        tmp_path / "o.pptx",
+        script,
+        template_path=template,
+        include_speaker_notes=True,
+    )
+
+    args_file = Path(str(out) + ".args").read_text(encoding="utf-8")
+    template_part, outline_part = args_file.split("|", 1)
+    assert template_part == str(template)
+    assert "Notes:" in outline_part
+
+
+def test_export_pptx_defaults_are_unchanged(tmp_path: Path) -> None:
+    """缺省（无模板、无备注）时传给导出脚本的大纲与源文件逐字节一致。"""
+    from core.export_service import export_pptx
+
+    script = tmp_path / "fake_pptx.py"
+    script.write_text(
+        "import argparse, pathlib\n"
+        "p = argparse.ArgumentParser()\n"
+        "p.add_argument('input'); p.add_argument('--output'); p.add_argument('--template')\n"
+        "a = p.parse_args()\n"
+        "pathlib.Path(a.output).write_bytes(b'PK')\n"
+        "pathlib.Path(str(a.output) + '.args').write_text(\n"
+        "    (str(a.template) if a.template else '') + '|' + pathlib.Path(a.input).read_text(encoding='utf-8')\n"
+        ", encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    content = "# Slide\n- point one\n"
+    markdown = tmp_path / "outline.md"
+    markdown.write_text(content, encoding="utf-8")
+
+    out = export_pptx(markdown, tmp_path / "o.pptx", script)
+
+    args_file = Path(str(out) + ".args").read_text(encoding="utf-8")
+    template_part, outline_part = args_file.split("|", 1)
+    assert template_part == ""
+    assert outline_part == content
+    assert "Notes:" not in outline_part
+
+
+def test_citation_style_default_references_byte_identical(tmp_path: Path) -> None:
+    """citation_style 缺省时，References 与内联基线逐字节一致。"""
+    from core.research_pipeline import ResearchPipeline as RP
+
+    papers = [
+        PaperRecord(
+            title="Climate adaptation evidence",
+            authors=[f"A{i} Author" for i in range(7)],
+            year=2024,
+            journal="Research Journal",
+            doi="10.1234/climate",
+            source="crossref",
+        ),
+        PaperRecord(
+            title="No DOI paper",
+            authors=["Solo Writer"],
+            year=2020,
+            journal="",
+            url="https://example.org/x",
+            source="pubmed",
+        ),
+    ]
+
+    lines = RP._render_reference_lines(papers, "")
+
+    assert lines[0] == (
+        "[P1] A0 Author, A1 Author, A2 Author, A3 Author, A4 Author et al.. "
+        "Climate adaptation evidence. *Research Journal*. (2024). "
+        "https://doi.org/10.1234/climate"
+    )
+    assert lines[1] == "[P2] Solo Writer. No DOI paper. (2020). https://example.org/x"
+
+
+def test_citation_style_empty_and_numeric_are_byte_identical() -> None:
+    """``citation_style`` 为 ``""`` 与显式 ``"numeric"`` 都必须与现状逐字节一致。
+
+    真实运行时配置项默认值是 ``"numeric"``（非空），因此两条路径都要覆盖。
+    """
+    from core.research_pipeline import ResearchPipeline as RP
+
+    papers = [
+        PaperRecord(
+            title="Climate adaptation evidence",
+            authors=["A Author"],
+            year=2024,
+            journal="Research Journal",
+            doi="10.1234/climate",
+            source="crossref",
+        ),
+        PaperRecord(
+            title="No DOI paper",
+            authors=["Solo Writer"],
+            year=2020,
+            journal="",
+            url="https://example.org/x",
+            source="pubmed",
+        ),
+        # **空作者**边界：现状装配器输出 ``[P3] . Title.``（作者段为空仍留 ". "）。
+        # 引用样式渲染器必须复刻这一字节序列，否则"缺省即与改动前逐字节一致"不成立。
+        # 该样例故意保留：在 figure-citation-dev 把 numeric 空作者对齐现状之前，本
+        # 测试会保持红色——这是**刻意的可见性**，不得为了让测试变绿而删除。
+        PaperRecord(
+            title="Lost authors paper",
+            authors=[],
+            year=2021,
+            journal="Journal X",
+            doi="10.9999/noauth",
+            source="crossref",
+        ),
+    ]
+
+    baseline = RP._inline_reference_lines(papers)
+
+    assert RP._render_reference_lines(papers, "") == baseline
+    assert RP._render_reference_lines(papers, "numeric") == baseline
+
+
+def test_citation_style_author_year_changes_output() -> None:
+    """``citation_style="author_year"`` 必须真实改变参考文献渲染（若模块可用）。"""
+    from core.research_pipeline import ResearchPipeline as RP
+
+    papers = [
+        PaperRecord(
+            title="Climate adaptation evidence",
+            authors=["A Author"],
+            year=2024,
+            journal="Research Journal",
+            doi="10.1234/climate",
+            source="crossref",
+        )
+    ]
+
+    baseline = RP._inline_reference_lines(papers)
+    rendered = RP._render_reference_lines(papers, "author_year")
+
+    try:
+        from core import citation_styles
+
+        assert hasattr(citation_styles, "render_references")
+    except ImportError:
+        assert rendered == baseline, "缺少 citation_styles 时必须回退到内联基线"
+    else:
+        assert rendered != baseline, "author_year 必须产生与 numeric 不同的条目"
+
+
+# ------------------------------------------------------------------------------------- #
+# figures.* 接线：缺省不传任何样式参数，非缺省才真实进入 build_figures
+# ------------------------------------------------------------------------------------- #
+def test_figure_style_kwargs_default_is_empty() -> None:
+    """figures.* 全缺省时必须返回空 dict —— 调用与改动前逐字节一致。"""
+    from core.research_pipeline import ResearchPipeline as RP
+
+    assert RP._figure_style_kwargs(_config()) == {}
+
+
+def test_figure_style_kwargs_maps_config_to_builder_params() -> None:
+    """figures.* 非缺省时必须映射为 build_figures 的关键字参数。"""
+    from core.research_pipeline import ResearchPipeline as RP
+
+    style = RP._figure_style_kwargs(
+        _config(
+            figures_color_palette="colorblind",
+            figures_default_format="pdf",
+            figures_font_family="DejaVu Sans",
+            figures_default_journal="Nature",
+            figures_font_size_pt=12,
+        )
+    )
+
+    assert style == {
+        "palette": "colorblind",
+        "default_format": "pdf",
+        "font_family": "DejaVu Sans",
+        "default_journal": "Nature",
+        "font_size_pt": 12,
+    }
+
+
+def test_figure_style_kwargs_drops_config_default_palette_and_size() -> None:
+    """配置默认值 ``"default"`` 配色不得作为 palette 传入（否则会新增告警）。"""
+    from core.research_pipeline import ResearchPipeline as RP
+
+    style = RP._figure_style_kwargs(
+        _config(figures_color_palette="default", figures_font_size_pt=10)
+    )
+
+    # 字号 10 是后端默认，可传可不传；关键是 "default" 配色必须被丢弃。
+    assert "palette" not in style
+
+
+def test_figure_default_format_changes_real_figure_filenames(tmp_path: Path) -> None:
+    """figures_default_format 必须真实改变图件文件名（不是读了没用）。"""
+    data = tmp_path / "data.csv"
+    data.write_text(
+        "group,score\nA,1\nA,2\nA,3\nA,4\nA,5\nB,6\nB,7\nB,8\nB,9\nB,10\n",
+        encoding="utf-8",
+    )
+
+    def figures_for(project: str, default_format: str) -> dict:
+        pipeline = ResearchPipeline(
+            ArtifactStore(tmp_path / "projects"),
+            searcher=FakeSearcher(),
+            llm_client=FakeLLM(body="# Draft\n\nA difference was observed [P1] (p = 0.001).\n"),
+            doi_resolver=FakeResolver(),
+            reviewer_count=0,
+        )
+        pipeline.run(
+            _config(
+                project_name=project,
+                data_path=data,
+                figures_default_format=default_format,
+            )
+        )
+        return json.loads(
+            (
+                tmp_path
+                / f"projects/{project}/artifacts/visualization/figures.json.v1"
+            ).read_text(encoding="utf-8")
+        )
+
+    png = figures_for("figfmt-png", "png")
+    pdf = figures_for("figfmt-pdf", "pdf")
+
+    assert png["figures"] and pdf["figures"]
+    assert all(f["filename"].endswith(".png") for f in png["figures"])
+    assert all(f["filename"].endswith(".pdf") for f in pdf["figures"])
+
+
+def test_end_to_end_delivery_config_produces_complete_manuscript(tmp_path: Path) -> None:
+    """端到端：写入写作/评审/引用配置后，真实链路仍产出完整手稿与评审产物。"""
+    data = tmp_path / "data.csv"
+    data.write_text(
+        "group,score\nA,1\nA,2\nA,3\nA,4\nA,5\nB,6\nB,7\nB,8\nB,9\nB,10\n",
+        encoding="utf-8",
+    )
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(body="# Draft\n\nA difference was observed [P1] (p = 0.001).\n"),
+        doi_resolver=FakeResolver(),
+        reviewer_count=3,
+    )
+    result = pipeline.run(
+        _config(
+            project_name="delivery-e2e",
+            data_path=data,
+            writing_paper_type="research_article",
+            writing_language="zh",
+            writing_bilingual_abstract=True,
+            writing_style_guide="保持客观",
+            citation_style="",
+            review_include_devil_advocate=True,
+            review_consensus_threshold=0.6,
+            review_score_scale="0-100",
+        )
+    )
+
+    manuscript = result.manuscript_path.read_text(encoding="utf-8")
+    assert "# 推断统计分析报告" in manuscript
+    assert "## References" in manuscript
+    assert result.review is not None
+    assert len(result.review.reports) == 3
+    assert (
+        tmp_path / "projects/delivery-e2e/artifacts/review/review_reports.md.v1"
+    ).is_file()
