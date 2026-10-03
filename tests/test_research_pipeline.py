@@ -634,9 +634,18 @@ def test_manuscript_claim_gate_failure_is_advisory_and_never_blocks(tmp_path: Pa
     # 运行完成、手稿产出，且 warning 中有说明。
     assert result.manuscript_path.exists()
     assert any("正文级论断核验未执行" in warning for warning in result.warnings)
-    # 关口失败时仍不留残缺产物：json/md 均未落盘。
+    # Phase 7 修复：关口抛错时**也必须落盘**，且产物如实记录 ran=False。
+    # 旧行为（不落盘）会让 resume 永久无法复用 writing——一次瞬时故障之后每次都
+    # 重新付费，而运行却显示“成功”。
     writing = tmp_path / "projects/gateboom/artifacts/writing"
-    assert not (writing / "manuscript_claim_verification.json.v1").exists()
+    payload = json.loads(
+        (writing / "manuscript_claim_verification.json.v1").read_text(encoding="utf-8")
+    )
+    assert payload["ran"] is False
+    assert payload["not_run_reason"]
+    # ran=False 时 passed 必须为 False：「未执行」绝不能被读作「检查通过」。
+    assert payload["passed"] is False
+    assert (writing / "manuscript_claim_verification.md.v1").is_file()
 
 
 def test_manuscript_claim_gate_model_failure_degrades_with_warning(
@@ -1007,7 +1016,12 @@ def test_should_continue_false_stops_before_analysis(tmp_path: Path) -> None:
     """`should_continue` 返回 False → 抛 `ResearchPipelineCancelled`。
 
     取消在**阶段边界**生效：这里让它恰好在 search 边界后返回 False，于是 search
-    已经跑完（并落盘），但 analysis 阶段**绝不被进入**——用计数桩证明模型调用为 0。
+    已经跑完（并落盘），但 analysis 阶段**绝不被进入**——用计数桩证明 analysis 的
+    模型调用为 0。
+
+    Phase 7：相关性关口在 **search 阶段内**执行，恰好一次 `complete_json`；这**不是**
+    “进入了 analysis”。因此这里断言的是「相对 search 结束时不再新增调用」，而不是
+    「调用总数为 0」。
     """
     searcher = CountingSearcher()
     llm = CountingLLM()
@@ -1037,11 +1051,18 @@ def test_should_continue_false_stops_before_analysis(tmp_path: Path) -> None:
         )
 
     assert searcher.calls == 1, "search 阶段应已执行"
-    assert llm.complete_json_calls == 0, "取消后不得进入 analysis（0 次模型调用）"
+    # search 阶段内的相关性关口恰好一次模型调用（Phase 7）；analysis 未进入，
+    # 因此总数不应超过这一次。
+    assert llm.complete_json_calls == 1, (
+        "取消后只应有 search 阶段内的相关性关口调用；analysis 不得进入"
+    )
     assert llm.complete_calls == 0, "取消后不得进入 writing"
     # 取消不留下半成品：已完成的 search 阶段产物仍在磁盘上。
     literature = tmp_path / "projects/cancel1/artifacts/search/literature.json.v1"
     assert literature.is_file()
+    # 相关性关口在 search 阶段内已落盘（续跑据此可复用 search）。
+    relevance = tmp_path / "projects/cancel1/artifacts/search/relevance_check.json.v1"
+    assert relevance.is_file()
     # 未进入的阶段没有产物。
     assert not (tmp_path / "projects/cancel1/artifacts/analysis").exists()
 
@@ -1388,3 +1409,204 @@ def test_no_usage_report_is_silent_and_behavior_unchanged(tmp_path: Path) -> Non
     )
     assert result.usage_note == ""
     assert not (tmp_path / "projects/nounit/artifacts/run").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 7：相关性关口（顾问级）——在 search 阶段内、且在 progress 之前落盘
+# --------------------------------------------------------------------------- #
+class RelevanceRecordingLLM(CountingLLM):
+    """记录「每次 complete_json 收到的提示词」，用于精确断言调用来自哪个关口。"""
+
+    def __init__(self, body: str = BODY) -> None:
+        super().__init__(body=body)
+        self.system_prompts: list[str] = []
+        self.user_prompts: list[str] = []
+
+    def complete_json(self, system_prompt: str, user_prompt: str) -> dict:
+        self.system_prompts.append(system_prompt)
+        self.user_prompts.append(user_prompt)
+        if "相关性评审员" in system_prompt:
+            return {
+                "verdicts": [
+                    {
+                        "citation_id": "P1",
+                        "relevance": "relevant",
+                        "rationale": "标题与主题直接相关。",
+                    }
+                ]
+            }
+        return super().complete_json(system_prompt, user_prompt)
+
+
+def test_relevance_artifacts_persist_before_search_completed_signal(
+    tmp_path: Path,
+) -> None:
+    """相关性产物必须在 `progress("search","completed")` **之前**已落盘。
+
+    这是本阶段最容易做错的地方：`completed` 是 P5.5 记录"该阶段产物已落盘"的时刻。
+    这里在 on_progress 回调里、**那一刻**检查文件已在磁盘上；若落盘晚于该回调，本
+    测试必然失败——从而锁死"指纹已记录、产物还不存在"这个窗口。
+    """
+    observed: dict[str, bool] = {}
+
+    def on_progress(stage: str, status: str) -> None:
+        if stage == "search" and status == "completed":
+            search_dir = tmp_path / "projects/relseq/artifacts/search"
+            observed["json"] = (search_dir / "relevance_check.json.v1").is_file()
+            observed["md"] = (search_dir / "relevance_check.md.v1").is_file()
+
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=CountingSearcher(),
+        llm_client=RelevanceRecordingLLM(),
+        doi_resolver=FakeResolver(),
+        progress=on_progress,
+    )
+    pipeline.run(
+        ResearchPipelineConfig(
+            project_name="relseq",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+
+    assert observed.get("json") is True, (
+        "相关性 JSON 必须在 progress('search','completed') 之前落盘"
+    )
+    assert observed.get("md") is True, (
+        "相关性 Markdown 必须在 progress('search','completed') 之前落盘"
+    )
+
+
+def test_relevance_gate_exactly_one_model_call(tmp_path: Path) -> None:
+    """相关性关口恰好贡献 **1** 次模型调用（非空文献时），检索阶段内完成。"""
+    llm = RelevanceRecordingLLM()
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=CountingSearcher(),
+        llm_client=llm,
+        doi_resolver=FakeResolver(),
+        reviewer_count=0,
+    )
+    pipeline.run(
+        ResearchPipelineConfig(
+            project_name="relcost",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+
+    relevance_calls = [
+        prompt for prompt in llm.system_prompts if "相关性评审员" in prompt
+    ]
+    assert len(relevance_calls) == 1, "相关性关口必须恰好一次模型调用"
+
+
+def test_relevance_gate_never_deletes_papers(tmp_path: Path) -> None:
+    """相关性关口**只标记、绝不删除文献**：文献数与不带该关口时一致。"""
+    llm = RelevanceRecordingLLM()
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=CountingSearcher(),
+        llm_client=llm,
+        doi_resolver=FakeResolver(),
+    )
+    result = pipeline.run(
+        ResearchPipelineConfig(
+            project_name="relkeep",
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+        )
+    )
+
+    # 检索到的 1 篇文献必须原样保留（无论相关判定如何）。
+    literature = json.loads(
+        (
+            tmp_path / "projects/relkeep/artifacts/search/literature.json.v1"
+        ).read_text(encoding="utf-8")
+    )
+    assert len(literature) == 1
+    assert len(result.papers) == 1
+
+
+def test_advisory_gate_failure_still_persists_and_enables_resume(
+    tmp_path: Path,
+) -> None:
+    """核心修复：顾问级关口抛错时**仍落盘**，且随后续跑能复用 writing。
+
+    旧缺陷：关口抛错 → 不落盘 → `core/resume.py` 因缺产物而永久拒绝复用 writing，
+    一次瞬时故障之后每次都重新付费，而运行仍显示“成功”。本测试同时锁定：
+    1. 抛错时产物仍存在，且 `ran=False` + `not_run_reason` 非空；
+    2. 再次运行（无故障）时 writing 可被复用（外部模型调用不再增加）。
+    """
+    from core import research_pipeline as rp
+
+    original = rp.verify_manuscript_claims
+
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("manuscript gate model unavailable")
+
+    # --- 第一次：关口故障，但必须落盘并完成运行 -----------------------------
+    rp.verify_manuscript_claims = boom  # type: ignore[assignment]
+    try:
+        first = ResearchPipeline(
+            ArtifactStore(tmp_path / "projects"),
+            searcher=CountingSearcher(),
+            llm_client=RelevanceRecordingLLM(),
+            doi_resolver=FakeResolver(),
+        ).run(
+            ResearchPipelineConfig(
+                project_name="gatepersist",
+                topic="climate adaptation",
+                sources=["crossref"],
+                max_results=2,
+            )
+        )
+    finally:
+        rp.verify_manuscript_claims = original  # type: ignore[assignment]
+
+    assert first.manuscript_path.exists()
+    writing = tmp_path / "projects/gatepersist/artifacts/writing"
+    payload = json.loads(
+        (writing / "manuscript_claim_verification.json.v1").read_text(encoding="utf-8")
+    )
+    assert payload["ran"] is False
+    assert payload["not_run_reason"]
+    assert payload["passed"] is False
+    assert (writing / "manuscript_claim_verification.md.v1").is_file()
+
+    # --- 第二次：无故障，writing 必须能被复用 ------------------------------
+    from core.resume import RESUME_STEPS, RunFingerprint, plan_resume
+
+    store = ArtifactStore(tmp_path / "projects")
+    decision = plan_resume(
+        artifact_store=store,
+        project_name="gatepersist",
+        fingerprint=RunFingerprint.build(
+            topic="climate adaptation",
+            sources=["crossref"],
+            max_results=2,
+            data_path=None,
+            reviewer_count=1,
+            figure_dpi=300,
+        ),
+        previous_steps={
+            marker: RunFingerprint.build(
+                topic="climate adaptation",
+                sources=["crossref"],
+                max_results=2,
+                data_path=None,
+                reviewer_count=1,
+                figure_dpi=300,
+            )
+            for marker in ("search", "lit_review", "writing")
+        },
+        enabled=True,
+    )
+    assert decision.can_skip("writing"), (
+        "关口抛错后 writing 阶段仍必须可复用（产物已如实落盘）"
+    )
+    assert set(decision.reusable) == set(RESUME_STEPS)

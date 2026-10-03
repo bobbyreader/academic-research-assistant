@@ -677,3 +677,76 @@ def test_ellipsis_quote_with_missing_fragment_is_downgraded() -> None:
 
     assert report.claims[0].evidence[0].verdict == "unclear"
     assert "引用未能在摘要中找到" in report.claims[0].evidence[0].rationale
+
+
+# --------------------------------------------------------------------------- #
+# 24. ran 字段（Phase 7）：往返 + 旧产物兼容 + ran=False 语义
+# --------------------------------------------------------------------------- #
+def test_report_ran_defaults_true_on_successful_run() -> None:
+    llm = FakeLLM({"verdicts": [_verdict(0, "P1", "supports", quote=P1_ABSTRACT)]})
+
+    report = verify_claims(
+        llm, claims=[{"claim": "Heat raises mortality.", "citation_ids": ["P1"]}],
+        papers=_papers(),
+    )
+
+    assert report.ran is True
+    assert report.not_run_reason == ""
+
+
+def test_report_ran_roundtrips_through_dict() -> None:
+    report = ClaimVerificationReport(ran=False, not_run_reason="模型挂了")
+    restored = ClaimVerificationReport.from_dict(report.to_dict())
+
+    assert restored.ran is False
+    assert restored.not_run_reason == "模型挂了"
+    assert restored.passed is False
+
+
+def test_from_dict_without_ran_key_is_backward_compatible() -> None:
+    # 模拟 Phase 5.1/6 产出的、没有 ran / not_run_reason 的旧产物。
+    payload = {
+        "passed": True,
+        "claim_count": 0,
+        "unsupported_count": 0,
+        "claims_without_evidence_count": 0,
+        "warnings": [],
+        "author_checks": [],
+        "claims": [],
+    }
+
+    report = ClaimVerificationReport.from_dict(payload)
+
+    assert report.ran is True
+    assert report.not_run_reason == ""
+
+
+def test_not_run_report_is_never_passed() -> None:
+    # 没有 unsupported、也没有无引用论断，但 ran=False → 绝不能读作「通过」。
+    report = ClaimVerificationReport(ran=False, not_run_reason="模型调用失败")
+
+    assert report.passed is False
+    assert report.unsupported_claims == []
+    assert report.claims_without_evidence == []
+
+
+def test_model_failure_marks_report_not_run_with_reason() -> None:
+    llm = FakeLLM(RuntimeError("upstream boom"))
+
+    report = verify_claims(
+        llm,
+        claims=[{"claim": "Heat raises mortality.", "citation_ids": ["P1"]}],
+        papers=_papers(),
+    )
+
+    assert report.ran is False
+    assert report.not_run_reason
+    assert report.passed is False
+
+
+def test_to_dict_always_exposes_ran_and_reason_keys() -> None:
+    report = ClaimVerificationReport()
+    payload = report.to_dict()
+
+    assert "ran" in payload
+    assert "not_run_reason" in payload

@@ -113,9 +113,22 @@ class PaperRecord:
 
 @dataclass
 class SearchReport:
-    """Search output, including non-fatal upstream failures."""
+    """Search output, including non-fatal upstream failures.
+
+    ``papers`` 的长度是**最终收录条数**，受 ``max_results``（总量上限）约束；
+    被上限裁掉的条数与排序依据记录在下列新增字段中，保证"绝不静默丢弃"。
+    所有新增字段均带默认值，向后兼容既有的构造与序列化调用。
+    """
 
     papers: list[PaperRecord]
     errors: list[str] = field(default_factory=list)
     sources_attempted: list[str] = field(default_factory=list)
     counts_by_source: dict[str, int] = field(default_factory=dict)
+    #: 去重前从各来源收到的原始条数。
+    total_found: int = 0
+    #: 去重后的候选条数（= 排序输入规模）。
+    deduplicated_count: int = 0
+    #: 因总量上限（``max_results``）被裁掉的条数。
+    dropped_by_limit: int = 0
+    #: 人类可读的排序依据，用于如实报告"找到了多少、留下了多少、为什么"。
+    ranking_reasons: list[str] = field(default_factory=list)

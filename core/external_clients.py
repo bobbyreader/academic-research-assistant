@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from typing import Any, Protocol
 
 from core.http_client import HttpClientError, UrllibTransport
 from core.research_models import PaperRecord, SearchReport
+from core.retrieval import build_query, deduplicate, normalize_doi, rank_candidates
 
 
 class Transport(Protocol):
@@ -61,9 +63,13 @@ def _strip_markup(value: str) -> str:
 
 
 def _normalize_doi(value: Any) -> str:
-    doi = _text(value)
-    doi = re.sub(r"^https?://doi.org/", "", doi, flags=re.IGNORECASE)
-    return doi.removesuffix(".").strip()
+    """委托给 :func:`core.retrieval.normalize_doi`（唯一权威实现）。
+
+    刻意不在本文件保留第二份实现：去重键与源层解析必须用**同一套**归一化，
+    两处各写一份必然漂移（``https://doi.org/10.1234/x`` vs ``10.1234/x`` 会被
+    判成两篇）。
+    """
+    return normalize_doi(value)
 
 
 def _authors(value: Any) -> list[str]:
@@ -319,23 +325,71 @@ class LiteratureSearcher:
         sources: list[str],
         max_results: int,
     ) -> SearchReport:
+        """检索多个来源、去重、按确定性规则排序，并把总量裁剪到 ``max_results``。
+
+        **行为变更（刻意）：``max_results`` 现在是"最终收录的总量上限"**，
+        而不是过去那种"每个来源各自的上限"。例如 ``--max-results 10`` 配 3 个
+        来源，旧行为最多返回 30 篇，新行为**最多 10 篇**——这与用户对这个名字的
+        直觉一致。
+
+        单源预算是 :func:`math.ceil`\\ ``(max_results / len(sources))``，至少为 1；
+        这样即使上游返回很多，也不会因为先到先得而让某个来源独占全部名额。
+
+        裁剪**绝不静默**：被裁掉的条数进入 :attr:`SearchReport.dropped_by_limit`，
+        原始条数、去重后条数进入 :attr:`SearchReport.total_found` /
+        :attr:`SearchReport.deduplicated_count`，排序依据进入
+        :attr:`SearchReport.ranking_reasons`。调用方据此可以如实告诉用户
+        "找到了多少、留下了多少、为什么"。
+
+        查询串按来源适配（见 :func:`core.retrieval.build_query`）：``pubmed`` /
+        ``arxiv`` 用 ``AND`` 连接词项，其余来源用空格连接；词项提取为空时回退
+        为原主题。
+
+        **重名来源会被保序去重**（见下方 ``unique_sources``）：``sources`` 里若
+        同一名称出现两次，只会向其发起一次检索，避免 ``counts_by_source`` 覆盖与
+        ``total_found`` 重复累加导致二者不自洽。``sources_attempted`` 也记录去重后
+        的列表。
+
+        去重与**字段合并**见 :func:`core.retrieval.deduplicate`：同一篇文献的多条
+        记录会合并（摘要取最长、引用取最大、年份取最早非空……），因此结果与
+        ``sources`` 顺序无关。"标题归一化后相同但旁证不足"的记录**保留为多条**，
+        并记入 :attr:`SearchReport.ranking_reasons`（绝不静默丢弃）。
+
+        既有契约不变：:class:`SearchReport` 的 ``papers`` / ``errors`` /
+        ``sources_attempted`` / ``counts_by_source`` 语义与类型保持原样，新增字段
+        均带默认值。
+        """
         if not query.strip():
             raise ValueError("研究主题不能为空")
         if max_results < 1:
             raise ValueError("max_results 必须大于 0")
+        if len(sources) == 0:
+            raise ValueError("sources 不能为空")
 
-        papers: list[PaperRecord] = []
+        # 保序去重来源名：重名不再重复检索，保证 counts_by_source 与 total_found 自洽
+        # （否则同名键互相覆盖，sum(counts) != total_found）。
+        unique_sources = list(dict.fromkeys(sources))
+
+        # 单源预算：向上取整，至少 1。保证总量上限按设计成立。
+        per_source_budget = max(1, math.ceil(max_results / len(unique_sources)))
+
+        # 收集 (source_name, paper) 对；来源顺序不影响最终结果（去重/合并/排序都
+        # 是集合级确定性的，见 core.retrieval）。
+        collected: list[tuple[str, PaperRecord]] = []
         errors: list[str] = []
         counts: dict[str, int] = {}
-        for source_name in sources:
+        total_found = 0
+        for source_name in unique_sources:
             source = self.sources.get(source_name)
             if source is None:
                 errors.append(f"{source_name}: 未配置该检索源")
                 continue
             try:
-                found = source.search(query, max_results)
+                source_query = build_query(query, source_name)
+                found = source.search(source_query, per_source_budget)
                 counts[source_name] = len(found)
-                papers.extend(found)
+                total_found += len(found)
+                collected.extend((source_name, paper) for paper in found)
             except (
                 HttpClientError,
                 RuntimeError,
@@ -346,19 +400,35 @@ class LiteratureSearcher:
             ) as exc:
                 errors.append(f"{source_name}: {exc}")
 
-        deduplicated: list[PaperRecord] = []
-        seen: set[str] = set()
-        for paper in papers:
-            key = paper.doi.lower() if paper.doi else re.sub(
-                r"\W+", " ", paper.title.lower()
-            ).strip()
-            if key and key not in seen:
-                seen.add(key)
-                deduplicated.append(paper)
+        dedup = deduplicate(collected)
+        candidates = list(dedup.candidates)
+
+        ranked = rank_candidates(candidates, topic=query)
+
+        kept = ranked[:max_results]
+        dropped_by_limit = len(ranked) - len(kept)
+
+        ranking_reasons: list[str] = []
+        ranking_reasons.extend(dedup.kept_separate)
+        if ranked:
+            ranking_reasons.append(
+                f"排序依据（高→低）：多源命中数、主题词项重合、引用数、年份新近；"
+                f"共 {len(ranked)} 篇去重候选，保留前 {len(kept)} 篇"
+                f"（总量上限 {max_results}，单源预算 {per_source_budget}）。"
+            )
+            for position, item in enumerate(kept, start=1):
+                ranking_reasons.append(
+                    f"#{position} {item.paper.title}：得分 {item.score}；"
+                    + "；".join(item.reasons)
+                )
 
         return SearchReport(
-            papers=deduplicated,
+            papers=[item.paper for item in kept],
             errors=errors,
-            sources_attempted=sources,
+            sources_attempted=list(unique_sources),
             counts_by_source=counts,
+            total_found=total_found,
+            deduplicated_count=len(candidates),
+            dropped_by_limit=dropped_by_limit,
+            ranking_reasons=ranking_reasons,
         )

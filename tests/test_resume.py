@@ -80,6 +80,17 @@ def _write_complete_artifacts(store: ArtifactStore, project: str = "p") -> None:
     store.save_artifact(
         project, "search", "search_report.json", json.dumps({"result_count": 1})
     )
+    # Phase 7 的相关性校验产物。`_search_complete` 无条件要求它存在：该关口始终产出
+    # 报告（含 ran=False 的"未执行"记录），因此"缺失"就等于"检索阶段没走完"。
+    store.save_artifact(
+        project,
+        "search",
+        "relevance_check.json",
+        json.dumps({"ran": True, "verdicts": []}),
+    )
+    store.save_artifact(
+        project, "search", "relevance_check.md", "relevance body"
+    )
     # 给出非空 key_findings，使 claims 阶段确有产物需要核验（否则该阶段视为无事可做）。
     store.save_artifact(
         project,

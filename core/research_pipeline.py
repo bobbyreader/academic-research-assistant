@@ -31,6 +31,7 @@ from core.manuscript_verifier import (
     verify_manuscript_claims,
 )
 from core.peer_reviewer import PeerReviewBundle, PeerReviewError, review_manuscript
+from core.relevance_verifier import verify_relevance
 from core.research_models import PaperRecord, SearchReport
 from core.resume import ResumeDecision, describe_reuse
 from core.statistics_engine import (
@@ -154,6 +155,9 @@ class ResearchPipeline:
         artifacts: list[Path] = []
         #: 重水化失败时追加的警告；这类警告必须在结果里可见（见 `_rehydrate_*`）。
         rehydrate_warnings: list[str] = []
+        #: 相关性关口（顾问级）生成的警告。它只标记、不删除文献，其"未执行"也必须
+        #: 如实上报，故与其它警告一样汇总进返回结果。
+        relevance_warnings: list[str] = []
         reused_steps: list[str] = []
         #: 已跳过（复用）阶段产生的产物也存在，记入返回的 artifact_paths，使 CLI/Web
         #: 看到的产物清单与全新运行一致。
@@ -218,9 +222,42 @@ class ResearchPipeline:
                     "counts_by_source": report.counts_by_source,
                     "errors": report.errors,
                     "result_count": len(report.papers),
+                    # Phase 7：如实记录"找到了多少、留下了多少、为什么裁掉"。被总量
+                    # 上限裁掉不是错误，但**必须可见**——静默丢弃会让用户以为这就是
+                    # 全部检索结果。
+                    "total_found": report.total_found,
+                    "deduplicated_count": report.deduplicated_count,
+                    "dropped_by_limit": report.dropped_by_limit,
+                    "ranking_reasons": list(report.ranking_reasons),
                 },
             )
             artifacts.extend([literature_path, report_path])
+            # 相关性关口（顾问级）。**必须在 `progress("search", "completed")` 之前
+            # 落盘**：该回调正是 P5.5 记录"本阶段产物已落盘"的时刻，晚于它就会出现
+            # "指纹已记录、产物还不存在"的窗口——续跑会误以为检索阶段已完成。
+            #
+            # 关口**始终**产出产物（`verify_relevance` 绝不抛异常；模型失败时返回
+            # `ran=False` 的报告），故这里**无条件**落盘，不写 try/except，也就不会
+            # 重现"关口抛错 → 不落盘 → writing 永久无法复用"的缺陷。
+            #
+            # 只标记、绝不删除：`report.papers` 不因该关口而改变。
+            relevance_report = verify_relevance(self.llm_client, config.topic, report.papers)
+            relevance_artifacts = [
+                self._save_json(
+                    config.project_name,
+                    "search",
+                    "relevance_check.json",
+                    relevance_report.to_dict(),
+                ),
+                self.artifact_store.save_artifact(
+                    config.project_name,
+                    "search",
+                    "relevance_check.md",
+                    relevance_report.to_markdown(),
+                ),
+            ]
+            artifacts.extend(relevance_artifacts)
+            relevance_warnings.extend(relevance_report.warnings())
             self.progress("search", "completed")
         assert report is not None  # 检索阶段后必有可用结果（否则上面已抛错）
 
@@ -495,6 +532,11 @@ class ResearchPipeline:
             warnings.extend(stats_verification.warnings())
         warnings.extend(review_warnings)
         warnings.extend(rehydrate_warnings)
+        warnings.extend(relevance_warnings)
+        # 被总量上限裁掉的文献必须**可见**：静默丢弃会让用户误以为这就是全部检索
+        # 结果。这里只加一条可核对的说明，绝不删除任何文献（`report.papers` 不变）。
+        if report.dropped_by_limit:
+            warnings.append(self._dropped_by_limit_note(report))
         # 用量统计是纯观测：只把 `UsageReport` 的内容原样带给调用方，绝不在管线里
         # 做任何数字加工（不估算、不补齐、不四舍五入）。
         usage_note = ""
@@ -627,6 +669,18 @@ class ResearchPipeline:
             "为避免复用损坏的产物，本次改为重新执行该阶段（可能产生额外的模型调用）。"
         )
 
+    @staticmethod
+    def _dropped_by_limit_note(report: SearchReport) -> str:
+        """生成"有文献因总量上限被裁掉"的可核对说明（只说明，不删除）。"""
+        reasons = "；".join(report.ranking_reasons[:3]) or "未记录排序依据"
+        return (
+            f"检索到 {report.total_found} 篇、去重后 {report.deduplicated_count} 篇，"
+            f"其中 {report.dropped_by_limit} 篇因总量上限 max_results="
+            f"{len(report.papers) + report.dropped_by_limit} 被裁掉（本次保留 "
+            f"{len(report.papers)} 篇）。排序依据：{reasons}。"
+            "被裁掉不是错误，但请知悉本次并未覆盖全部候选文献。"
+        )
+
     def _read_json_artifact(
         self, project_name: str, stage: str, filename: str
     ) -> Any:
@@ -697,6 +751,7 @@ class ResearchPipeline:
         sources_attempted = report_payload.get("sources_attempted", [])
         counts_by_source = report_payload.get("counts_by_source", {})
         errors = report_payload.get("errors", [])
+        ranking_reasons = report_payload.get("ranking_reasons", [])
         return SearchReport(
             papers=papers,
             errors=[str(item) for item in errors] if isinstance(errors, list) else [],
@@ -710,7 +765,30 @@ class ResearchPipeline:
                 if isinstance(counts_by_source, dict)
                 else {}
             ),
+            # Phase 7 字段如实还原（默认 0/空列表）。这些值只是**说明用途**，
+            # 不参与任何判定；还原它们只为让续跑结果与全新运行对外呈现一致。
+            total_found=self._optional_int(report_payload.get("total_found"), len(papers)),
+            deduplicated_count=self._optional_int(
+                report_payload.get("deduplicated_count"), len(papers)
+            ),
+            dropped_by_limit=self._optional_int(report_payload.get("dropped_by_limit"), 0),
+            ranking_reasons=(
+                [str(item) for item in ranking_reasons]
+                if isinstance(ranking_reasons, list)
+                else []
+            ),
         )
+
+    @staticmethod
+    def _optional_int(value: object, default: int) -> int:
+        """把产物里的计数还原为 int；缺失或类型非法时回退为 ``default``。
+
+        这里**不抛异常**：这些计数是说明性字段，不是复用判定的依据，还原失败没有
+        理由让整个 search 阶段重跑（那会浪费一次真实检索）。
+        """
+        if isinstance(value, bool) or not isinstance(value, int):
+            return default
+        return value
 
     @staticmethod
     def _paper_from_dict(payload: object) -> PaperRecord:
@@ -1156,17 +1234,55 @@ class ResearchPipeline:
         deterministic evidence, so it produces an artifact and warnings rather
         than blocking the run. A failure inside this gate is itself downgraded to
         a warning — an advisory gate must never be able to break a run.
+
+        **始终落盘产物**：即使核验抛错（或根本没有论断可核验），也必须留下一份
+        如实记录 ``ran`` / ``not_run_reason`` 的产物。否则 `core/resume.py` 会因
+        产物缺失而**永久**拒绝复用 `writing` 阶段——一次瞬时故障会让用户之后每次
+        运行都重新付费，而运行却显示"成功"。产物缺失时**以 `ran=False` 报告**是
+        唯一诚实的做法：其存在只代表"关口走过并留下了记录"，绝不代表"核验干净"。
         """
         claims = analysis.get("key_findings")
         if not isinstance(claims, list) or not claims:
-            return None, [], []
+            # 没有论断需要核验：如实落盘一份 `ran=True, claims=[]` 的记录（"确实执行
+            # 且无事可做"），不制造含糊警告；续跑据此可安全复用本阶段。
+            empty = ClaimVerificationReport()
+            return empty, self._persist_claim_report(project_name, empty), []
 
         try:
             report = verify_claims(self.llm_client, claims=claims, papers=papers)
         except Exception as exc:  # noqa: BLE001 - advisory gate must never break a run
-            return None, [], [f"论断—证据核验未执行: {exc}"]
+            report = ClaimVerificationReport(
+                ran=False,
+                not_run_reason=f"核验过程抛出异常，本次论断—证据核验未执行：{exc}",
+            )
+            return (
+                report,
+                self._persist_claim_report(project_name, report),
+                [
+                    (
+                        f"论断—证据核验未执行（{exc}）；已如实落盘一份 ran=False 的"
+                        "记录（未执行不等于核验通过），writing 阶段的续跑不会因此被禁用。"
+                    )
+                ],
+            )
 
-        artifacts = [
+        warnings = list(report.warnings)
+        if not report.passed and report.ran:
+            warnings.append(
+                "论断—证据核验发现未被引用文献支持或缺乏引用的论断"
+                "（顾问级提示，未阻断）；请核对 claim_evidence_verification.md。"
+            )
+        return report, self._persist_claim_report(project_name, report), warnings
+
+    def _persist_claim_report(
+        self, project_name: str, report: ClaimVerificationReport
+    ) -> list[Path]:
+        """把论断核验报告落盘为 ``claim_evidence_verification.json/.md``。
+
+        无论报告是否真的执行过都落盘：续跑要求的正是这个产物存在，且其内容必须
+        如实反映 ``ran`` / ``not_run_reason``。
+        """
+        return [
             self._save_json(
                 project_name,
                 "writing",
@@ -1180,14 +1296,6 @@ class ResearchPipeline:
                 report.to_markdown(),
             ),
         ]
-
-        warnings = list(report.warnings)
-        if not report.passed:
-            warnings.append(
-                "论断—证据核验发现未被引用文献支持或缺乏引用的论断"
-                "（顾问级提示，未阻断）；请核对 claim_evidence_verification.md。"
-            )
-        return report, artifacts, warnings
 
     def _run_manuscript_claim_verification(
         self,
@@ -1207,13 +1315,49 @@ class ResearchPipeline:
         ``body`` is the model's raw draft, *not* the assembled manuscript: the
         system-appended ``## References`` section is a list of ``[P1] Author…``
         lines that would otherwise be misread as citation sentences.
+
+        **始终落盘产物**：即使核验抛错，也必须留下一份如实记录 ``ran`` /
+        ``not_run_reason`` 的产物。它是 `core/resume.py` 判定 `writing` 阶段完成的
+        依据，缺失会让续跑**永久**无法复用该阶段（一次瞬时故障 = 之后每次都重跑）。
         """
         try:
             report = verify_manuscript_claims(self.llm_client, body, papers)
         except Exception as exc:  # noqa: BLE001 - advisory gate must never break a run
-            return None, [], [f"正文级论断核验未执行: {exc}"]
+            report = ClaimVerificationReport(
+                ran=False,
+                not_run_reason=f"核验过程抛出异常，本次正文级论断核验未执行：{exc}",
+            )
+            return (
+                report,
+                self._persist_manuscript_claim_report(project_name, report),
+                [
+                    (
+                        f"正文级论断核验未执行（{exc}）；已如实落盘一份 ran=False 的"
+                        "记录（未执行不等于核验通过），writing 阶段的续跑不会因此被禁用。"
+                    )
+                ],
+            )
 
-        artifacts = [
+        warnings = list(report.warnings)
+        if not report.passed and report.ran:
+            warnings.append(
+                "正文级论断核验发现部分「句子—被引文献」配对缺乏摘要支持"
+                "（顾问级提示，未阻断）；请核对 manuscript_claim_verification.md。"
+            )
+        return (
+            report,
+            self._persist_manuscript_claim_report(project_name, report),
+            warnings,
+        )
+
+    def _persist_manuscript_claim_report(
+        self, project_name: str, report: ClaimVerificationReport
+    ) -> list[Path]:
+        """把正文级论断核验报告落盘为 ``manuscript_claim_verification.json/.md``。
+
+        无论报告是否真的执行过都落盘，且内容如实反映 ``ran`` / ``not_run_reason``。
+        """
+        return [
             self._save_json(
                 project_name,
                 "writing",
@@ -1227,14 +1371,6 @@ class ResearchPipeline:
                 render_manuscript_claim_markdown(report),
             ),
         ]
-
-        warnings = list(report.warnings)
-        if not report.passed:
-            warnings.append(
-                "正文级论断核验发现部分「句子—被引文献」配对缺乏摘要支持"
-                "（顾问级提示，未阻断）；请核对 manuscript_claim_verification.md。"
-            )
-        return report, artifacts, warnings
 
     def _run_peer_review(
         self,

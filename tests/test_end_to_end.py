@@ -754,9 +754,13 @@ def test_cancel_stops_at_boundary_keeps_artifacts_and_resumes(
     1. The run stops with ``ResearchPipelineCancelled`` at a stage boundary
        (after ``search``, before ``analysis``).
     2. The artifacts already produced are still on disk — cancellation never
-       destroys work — and the model was not called for the next stage.
+       destroys work — and the **analysis** stage was not entered.
     3. A subsequent run reuses the preserved prefix (``search``) without
        re-querying the literature API, then finishes the manuscript.
+
+    Phase 7: the relevance gate legitimately makes ONE ``complete_json`` call
+    **inside** the search stage. So the property to lock is "analysis was not
+    entered", not "no model call happened at all".
     """
     harness = CancellingHarness(tmp_path, monkeypatch)
 
@@ -767,13 +771,22 @@ def test_cancel_stops_at_boundary_keeps_artifacts_and_resumes(
     assert ("search", "completed") in harness.stages_seen
     assert ("lit_review", "completed") not in harness.stages_seen
     assert harness.searcher.search_calls == 1, "search ran exactly once"
-    assert harness.llm.complete_json_calls == 0, (
-        "analysis (a model stage) must not have started before the boundary"
+    # search 阶段内的相关性关口恰好一次调用；analysis 未进入，故总数不超过它。
+    assert harness.llm.complete_json_calls == 1, (
+        "only the search-stage relevance gate should have called the model; "
+        "analysis must not have started before the boundary"
+    )
+    # 产物层面（最强）：analysis 阶段根本没被创建。
+    assert not (tmp_path / "projects/resume/artifacts/analysis").exists(), (
+        "analysis artifacts must not exist after cancelling at the boundary"
     )
 
     # --- 2. the search artifacts survive cancellation -----------------------
     literature = harness.latest("search", "literature.json")
     assert literature.is_file() and literature.stat().st_size > 0
+    # Phase 7：相关性产物也在 search 阶段内落盘，续跑据此可复用 search。
+    relevance = harness.latest("search", "relevance_check.json")
+    assert relevance.is_file() and relevance.stat().st_size > 0
 
     # Project state records the honest cancellation (not 'blocked').
     state = harness.orchestrator.state_manager.load("resume")
@@ -831,3 +844,141 @@ def test_usage_note_travels_the_real_chain_to_the_result(
     assert f"[用量] {note}" in out, (
         "the CLI must print the usage note verbatim, with no recomputation"
     )
+
+
+# ==========================================================================
+# Phase 7: the relevance gate + honest search reporting on the real chain
+# ==========================================================================
+
+
+class LimitSearcher:
+    """Stands in for the searcher when ``max_results`` is a **total** cap.
+
+    Returns more deduplicated candidates than ``max_results`` and reports the
+    Phase 7 accounting fields (total_found / deduplicated_count /
+    dropped_by_limit / ranking_reasons), as the real searcher now does.
+    """
+
+    def search(self, query: str, sources: list[str], max_results: int) -> SearchReport:
+        papers = [
+            PaperRecord(
+                title=f"Candidate paper {index}",
+                authors=["A Author"],
+                year=2024,
+                journal="Research Journal",
+                doi=f"10.1234/candidate-{index}",
+                abstract="A finding.",
+                source="crossref",
+            )
+            for index in range(5)
+        ]
+        kept = papers[:max_results]
+        return SearchReport(
+            papers=kept,
+            errors=[],
+            sources_attempted=list(sources),
+            counts_by_source={name: 5 for name in sources},
+            total_found=5,
+            deduplicated_count=5,
+            dropped_by_limit=5 - len(kept),
+            ranking_reasons=["仅 1 个检索源命中: crossref", "主题词项命中 1 个: climate"],
+        )
+
+
+def _run_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    searcher: object,
+    max_results: int,
+    project: str = "phase7",
+) -> Orchestrator:
+    orchestrator = Orchestrator(tmp_path)
+    orchestrator.init_project(project, "hybrid")
+    monkeypatch.setattr(
+        "core.research_service.LiteratureSearcher.from_config",
+        lambda **kwargs: searcher,
+    )
+    monkeypatch.setattr("core.research_service.build_llm_client", lambda **kwargs: FakeLLM())
+    monkeypatch.setattr("core.citation_verifier.CrossrefDoiResolver", FakeResolver)
+    orchestrator.run_real_research(
+        project,
+        "climate adaptation",
+        sources=["crossref"],
+        max_results=max_results,
+    )
+    return orchestrator
+
+
+def test_phase7_relevance_gate_lands_in_the_real_chain_and_export_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 7: 相关性关口走真实链路落盘，手稿仍可导出，且 `max_results` 是总量上限。"""
+    orchestrator = _run_chain(
+        tmp_path,
+        monkeypatch,
+        searcher=FakeSearcher(),
+        max_results=2,
+    )
+    base = tmp_path / "projects/phase7/artifacts/search"
+
+    relevance_json = base / "relevance_check.json.v1"
+    relevance_md = base / "relevance_check.md.v1"
+    assert relevance_json.is_file() and relevance_json.stat().st_size > 0
+    assert relevance_md.is_file() and relevance_md.stat().st_size > 0
+
+    payload = json.loads(relevance_json.read_text(encoding="utf-8"))
+    assert payload["ran"] is True
+    assert set(payload) >= {
+        "passed",
+        "ran",
+        "not_run_reason",
+        "verdict_count",
+        "irrelevant_count",
+        "unclear_count",
+        "verdicts",
+    }
+    # 只标记、绝不删除：检索到的每一篇都必须仍在 literature.json 中。
+    literature = json.loads(
+        (base / "literature.json.v1").read_text(encoding="utf-8")
+    )
+    assert payload["verdict_count"] == len(literature)
+
+    # 手稿仍可导出（新关口绝不阻断导出）。
+    markdown = orchestrator.export("phase7", "md")
+    assert markdown.is_file() and markdown.stat().st_size > 0
+    pdf = orchestrator.export("phase7", "pdf")
+    assert pdf.read_bytes()[:4] == b"%PDF"
+
+
+def test_phase7_max_results_is_a_total_cap_and_drop_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`max_results` 是**总量上限**：最终文献数 ≤ max_results，且被裁掉必须可见。"""
+    orchestrator = _run_chain(
+        tmp_path,
+        monkeypatch,
+        searcher=LimitSearcher(),
+        max_results=2,
+    )
+    base = tmp_path / "projects/phase7/artifacts/search"
+    literature = json.loads(
+        (base / "literature.json.v1").read_text(encoding="utf-8")
+    )
+    assert len(literature) <= 2, "max_results must cap the TOTAL number of papers"
+
+    report = json.loads((base / "search_report.json.v1").read_text(encoding="utf-8"))
+    assert set(report) >= {
+        "total_found",
+        "deduplicated_count",
+        "dropped_by_limit",
+        "ranking_reasons",
+    }
+    # 算术自洽：去重条数 - 最终收录条数 == 被裁条数。
+    assert report["deduplicated_count"] - len(literature) == report["dropped_by_limit"]
+    assert report["dropped_by_limit"] == 3
+
+    # CLI 必须如实、可见地报告被裁掉的文献。
+    orchestrator.report_literature_limit("phase7")
+    out = capsys.readouterr().out
+    assert "[检索]" in out and "3 篇" in out and "总量上限" in out

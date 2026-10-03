@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -139,6 +140,39 @@ class Orchestrator:
         note = getattr(result, "usage_note", "") or ""
         if note:
             print(f"[用量] {note}")
+
+    def report_literature_limit(self, project_name: str) -> None:
+        """若有文献因总量上限被裁掉，打印一行说明（数量 + 排序依据摘要）。
+
+        裁掉不是错误，但**必须可见**：静默丢弃会让用户误以为这就是全部检索结果。
+        这些数字来自 `search_report.json`（`core.research_pipeline`
+        如实落盘），这里只读不改、不重算——没有产物时什么也不打印，绝不臆造数字。
+        """
+        report = self.artifact_store.get_artifact(
+            project_name, "search", "search_report.json"
+        )
+        if report is None:
+            return
+        try:
+            payload = json.loads(report.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        dropped = payload.get("dropped_by_limit")
+        if not isinstance(dropped, int) or isinstance(dropped, bool) or dropped <= 0:
+            return
+        reasons = payload.get("ranking_reasons")
+        summary = (
+            "；".join(str(item) for item in reasons[:3])
+            if isinstance(reasons, list)
+            else ""
+        )
+        print(
+            f"[检索] 有 {dropped} 篇文献因总量上限被裁掉"
+            f"（保留 {payload.get('result_count', '?')} 篇）。"
+            + (f"排序依据：{summary}。" if summary else "")
+        )
 
     def show_status(self, project_name: str) -> None:
         """显示项目状态。
@@ -367,7 +401,15 @@ def main() -> None:
         default="crossref,pubmed,semantic_scholar",
         help="检索源，逗号分隔",
     )
-    research_parser.add_argument("--max-results", type=int, default=10)
+    research_parser.add_argument(
+        "--max-results",
+        type=int,
+        default=10,
+        help=(
+            "检索结果**总量上限**（不是每个检索源的上限）：各源合计去重后最多保留"
+            "该数量的文献，超出部分按排序依据裁掉（默认: 10）"
+        ),
+    )
     research_parser.add_argument("--data", type=Path, help="可选实验数据 CSV")
     research_parser.add_argument(
         "--provider",
@@ -436,6 +478,7 @@ def main() -> None:
             )
             orchestrator.report_resume(result)
             orchestrator.report_usage(result)
+            orchestrator.report_literature_limit(args.project_name)
             # argparse cannot narrow a free-form string to a Literal, and
             # --export accepts arbitrary values; Orchestrator.export validates.
             formats: list[ExportFormat] = (

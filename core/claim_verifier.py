@@ -214,11 +214,24 @@ class ClaimVerdict:
 
 @dataclass
 class ClaimVerificationReport:
-    """Aggregated evidence-support result for one manuscript."""
+    """Aggregated evidence-support result for one manuscript.
+
+    ``ran`` / ``not_run_reason`` are load-bearing for the *resume* contract: an
+    advisory gate must **always** leave an artifact behind (so a transient
+    failure cannot permanently disable reuse of the expensive ``writing`` stage),
+    and that artifact must record whether the check actually *executed*.
+
+    The rule is asymmetric on purpose: an artifact that says ``ran=False`` means
+    "we did not look" — it must **never** be read as "we looked and found nothing
+    wrong". Accordingly :attr:`passed` is forced to ``False`` whenever
+    ``ran`` is ``False``: "not checked" is not "checked clean".
+    """
 
     claims: list[ClaimVerdict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     author_checks: list[str] = field(default_factory=list)
+    ran: bool = True
+    not_run_reason: str = ""
 
     @property
     def unsupported_claims(self) -> list[ClaimVerdict]:
@@ -232,14 +245,18 @@ class ClaimVerificationReport:
 
     @property
     def passed(self) -> bool:
-        """True when no claim is unsupported and every claim cites something.
+        """True only when the check actually ran and found nothing to escalate.
 
-        仅为**上报信息**，绝不用于阻断流水线：本门是模型判断而非确定性证据。
+        ``ran=False`` 时**强制**为 ``False``：从未执行的核验绝不能被读作
+        「检查通过」。除此之外，当且仅当没有 unsupported 论断、且每条论断都引用了
+        文献时为真（仅为**上报信息**，绝不用于阻断流水线）。
         """
+        if not self.ran:
+            return False
         return not self.unsupported_claims and not self.claims_without_evidence
 
     def to_dict(self) -> dict[str, object]:
-        """返回可序列化的字典。"""
+        """返回可序列化的字典。键集是公共契约：只增不改不删。"""
         return {
             "passed": self.passed,
             "claim_count": len(self.claims),
@@ -248,6 +265,8 @@ class ClaimVerificationReport:
             "warnings": list(self.warnings),
             "author_checks": list(self.author_checks),
             "claims": [claim.to_dict() for claim in self.claims],
+            "ran": self.ran,
+            "not_run_reason": self.not_run_reason,
         }
 
     @classmethod
@@ -256,6 +275,10 @@ class ClaimVerificationReport:
 
         ``passed``、``claim_count``、``unsupported_count``、
         ``claims_without_evidence_count`` 均为派生字段，重建时由属性自动重算。
+
+        ``ran`` / ``not_run_reason`` 缺失时默认 ``True`` / ``""``，以兼容
+        Phase 5.1 / 6 产出的、没有这两个键的旧产物——那些产物都是由**成功执行**
+        的核验写出的，因此默认 ``ran=True`` 与事实一致。
         """
         data = _require_object(payload, cls.__name__)
         claims_payload = _require_list(data, "claims", cls.__name__)
@@ -266,23 +289,41 @@ class ClaimVerificationReport:
             ],
             warnings=_require_str_list(data, "warnings", cls.__name__),
             author_checks=_require_str_list(data, "author_checks", cls.__name__),
+            ran=_optional_bool(data, "ran", cls.__name__, default=True),
+            not_run_reason=_optional_str(data, "not_run_reason", cls.__name__),
         )
 
     def to_markdown(self) -> str:
-        """渲染为人类可读的 Markdown 报告。"""
-        lines = [
-            "# 论断证据支撑核验报告（建议性）",
-            "",
-            f"- 论断总数: {len(self.claims)}",
-            f"- 判定为 unsupported 的论断: {len(self.unsupported_claims)} 条",
-            f"- 未引用任何文献的论断: {len(self.claims_without_evidence)} 条",
-            f"- 结论: {'通过' if self.passed else '存在需人工核对的论断'}",
-            (
-                "- 说明: 本报告仅为建议，不会阻断流程；核验范围仅为**摘要**，"
-                "不涉及全文。"
-            ),
-            "",
-        ]
+        """渲染为人类可读的 Markdown 报告。
+
+        ``ran=False`` 时开头即明确声明「本次核验未执行」，避免被误读为通过。
+        """
+        lines = ["# 论断证据支撑核验报告（建议性）", ""]
+        if not self.ran:
+            lines.extend(
+                [
+                    (
+                        "> ⚠ **本次核验未执行。** 未执行的核验绝不等于「检查通过」，"
+                        "请勿据此认为论断已被核验。"
+                    ),
+                    f"> 未执行原因: {self.not_run_reason or '（未给出原因）'}",
+                    "",
+                ]
+            )
+        lines.extend(
+            [
+                f"- 是否执行: {'是' if self.ran else '否'}",
+                f"- 论断总数: {len(self.claims)}",
+                f"- 判定为 unsupported 的论断: {len(self.unsupported_claims)} 条",
+                f"- 未引用任何文献的论断: {len(self.claims_without_evidence)} 条",
+                f"- 结论: {'通过' if self.passed else '存在需人工核对的论断'}",
+                (
+                    "- 说明: 本报告仅为建议，不会阻断流程；核验范围仅为**摘要**，"
+                    "不涉及全文。"
+                ),
+                "",
+            ]
+        )
 
         for claim in self.claims:
             lines.append(f"## 论断 {claim.index + 1}: {claim.claim}")
@@ -460,6 +501,10 @@ def verify_claims(
     只调用**一次** ``llm_client.complete_json``（批量核验）；任何模型失败都被
     捕获并降级为 ``unclear`` 加警告，绝不向调用方抛出异常。
 
+    模型整体调用失败时，本次核验**根本没有发生**，因此返回的报告被标记为
+    ``ran=False``（且 ``passed`` 强制为 ``False``）：报告的存在只代表「关口走过
+    并且留下了记录」，不代表「核验干净」。
+
     Args:
         llm_client: 具备 ``complete_json(system_prompt, user_prompt) -> dict`` 的客户端。
         claims: ``[{"claim": str, "citation_ids": ["P1", ...]}, ...]``。
@@ -529,12 +574,16 @@ def verify_claims(
     # 唯一一次模型调用；失败一律降级。
     verdicts_by_pair: dict[tuple[int, str], tuple[str, str, str]] = {}
     misaligned_keys: list[tuple[int, str]] = []
+    model_failed = False
     if pending:
         try:
             payload = llm_client.complete_json(
                 _SYSTEM_PROMPT, _build_user_prompt(prompt_claims)
             )
         except Exception as exc:  # noqa: BLE001 - 模型失败必须降级而非中断
+            # 模型整体失败 = 本次**根本没有发生**核验：如实记为 ran=False，
+            # 绝不能因为「没有 unsupported」而被读成「检查通过」。
+            model_failed = True
             warnings.append(
                 f"论断证据核验的模型调用失败，全部待核验论断已降级为 unclear：{exc}"
             )
@@ -620,6 +669,9 @@ def verify_claims(
     report.claims = claim_verdicts
     report.warnings = warnings
     report.author_checks = _author_checks()
+    if model_failed:
+        report.ran = False
+        report.not_run_reason = "模型调用失败，本次核验未执行（相关判定均降级为 unclear）。"
     return report
 
 
@@ -845,6 +897,26 @@ def _require_bool(data: dict[str, Any], field: str, owner: str) -> bool:
             f"实际为 {type(value).__name__}"
         )
     return value
+
+
+def _optional_bool(
+    data: dict[str, Any], field: str, owner: str, *, default: bool
+) -> bool:
+    """字段缺失时返回 ``default``；存在时严格校验为 bool。
+
+    用于兼容旧产物：缺失的键意味着该产物由**成功执行**的核验写出，因此默认
+    ``True`` 与事实一致。但一旦键存在，取值非法仍然抛错（绝不静默吞掉损坏数据）。
+    """
+    if field not in data or data[field] is None:
+        return default
+    return _require_bool(data, field, owner)
+
+
+def _optional_str(data: dict[str, Any], field: str, owner: str) -> str:
+    """字段缺失时返回 ``""``；存在时严格校验为 str。"""
+    if field not in data or data[field] is None:
+        return ""
+    return _require_str(data, field, owner)
 
 
 def _require_optional_float(

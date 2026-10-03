@@ -408,6 +408,20 @@ def _search_complete(store: ArtifactStore, project_name: str) -> tuple[bool, str
         _json_artifact(store, project_name, "search", "search_report.json"), dict
     ):
         return False, "缺少 search/search_report.json，需重新检索。"
+    # 相关性校验（Phase 7）。该关口**始终**产出产物（含 ran=False 的"未执行"记录），
+    # 因此这里无条件要求它存在。缺失即意味着检索阶段没有走完。
+    #
+    # 代价：Phase 7 之前的项目缺少该产物，检索阶段会重跑一次。这是刻意的方向选择——
+    # 宁可多跑一个阶段，也不能让续跑**静默跳过一个关口**。
+    if not isinstance(
+        _json_artifact(store, project_name, "search", "relevance_check.json"), dict
+    ):
+        return False, (
+            "缺少 search/relevance_check.json，"
+            "相关性校验没有留下记录，需重新检索。"
+        )
+    if not _nonempty_artifact(store, project_name, "search", "relevance_check.md"):
+        return False, "缺少 search/relevance_check.md，需重新检索。"
     return True, ""
 
 
