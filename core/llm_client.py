@@ -283,6 +283,7 @@ def build_llm_client(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    timeout: int | None = None,
     workspace_dir: Path | None = None,
 ) -> LLMClient:
     """Build a client from explicit values, then environment variables."""
@@ -293,6 +294,7 @@ def build_llm_client(
             api_key=api_key or os.getenv("ARS_LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or "",
             model=model or os.getenv("ARS_LLM_MODEL") or "gpt-4o-mini",
             base_url=base_url or os.getenv("ARS_LLM_BASE_URL") or "https://api.openai.com/v1",
+            timeout=timeout if timeout is not None else LLMSettings.timeout,
         )
         return OpenAICompatibleClient(settings)
 
@@ -307,6 +309,7 @@ def build_llm_client(
                 or os.getenv("ARS_LLM_BASE_URL")
                 or "https://generativelanguage.googleapis.com/v1beta"
             ),
+            timeout=timeout if timeout is not None else LLMSettings.timeout,
         )
         return GeminiClient(settings)
 
@@ -315,6 +318,7 @@ def build_llm_client(
             provider="codex_cli",
             api_key="",
             model=model or os.getenv("CODEX_MODEL") or "",
+            timeout=timeout if timeout is not None else LLMSettings.timeout,
         )
         return CodexCLIClient(
             settings,

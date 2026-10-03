@@ -81,6 +81,7 @@ class ResearchPipeline:
         progress: ProgressCallback | None = None,
         doi_resolver: DoiResolver | None = None,
         reviewer_count: int = 1,
+        figure_dpi: int = 300,
     ) -> None:
         self.artifact_store = artifact_store
         self.searcher = searcher
@@ -89,6 +90,8 @@ class ResearchPipeline:
         self.doi_resolver = doi_resolver
         #: Number of simulated reviewers; <= 0 disables the peer-review stage.
         self.reviewer_count = reviewer_count
+        #: 出版级图表的分辨率，来自 settings.yaml 的 figures.default_dpi。
+        self.figure_dpi = figure_dpi
 
     def run(self, config: ResearchPipelineConfig) -> PipelineResult:
         if not config.topic.strip():
@@ -281,7 +284,9 @@ class ResearchPipeline:
         group_column = report.group_column if report is not None else None
         try:
             with tempfile.TemporaryDirectory(prefix="research-figures-") as temp_dir:
-                bundle = build_figures(data_path, Path(temp_dir), group_column=group_column)
+                bundle = build_figures(
+                    data_path, Path(temp_dir), group_column=group_column, dpi=self.figure_dpi
+                )
                 result.figures = bundle
                 result.warnings.extend(bundle.warnings)
                 for spec in bundle.figures:

@@ -13,9 +13,9 @@ from core.config_validation import (
     validate_settings,
 )
 
-# A settings mapping shaped like the repository's config/settings.yaml.
+# A settings mapping shaped like the repository's config/settings.yaml, i.e. it
+# only contains keys that some code path actually reads.
 VALID_SETTINGS: dict = {
-    "paths": {"projects_dir": "projects"},
     "api_keys": {"pubmed_email": "", "crossref_email": ""},
     "llm": {
         "provider": "codex_cli",
@@ -23,16 +23,8 @@ VALID_SETTINGS: dict = {
         "base_url": "",
         "timeout_seconds": 120,
     },
-    "search": {
-        "real_sources": ["crossref", "pubmed", "semantic_scholar", "arxiv"],
-    },
-    "citation": {
-        "default_style": "nature",
-        "supported_styles": ["nature", "apa", "ieee", "vancouver", "chicago"],
-    },
     "figures": {"default_dpi": 300},
     "review": {"reviewer_count": 1},
-    "export": {"default_format": "md"},
 }
 
 
@@ -109,34 +101,6 @@ def test_unknown_top_level_key_is_a_warning_only() -> None:
     assert _messages_contain(result.warnings, "brand_new_section")
 
 
-def test_unknown_source_names_the_offending_value() -> None:
-    settings = {
-        **VALID_SETTINGS,
-        "search": {"real_sources": ["crossref", "nope"]},
-    }
-
-    result = validate_settings(settings)
-
-    assert result.valid is False
-    assert _messages_contain(result.errors, "search.real_sources[1]")
-    assert _messages_contain(result.errors, "nope")
-
-
-def test_default_style_must_be_supported() -> None:
-    settings = {
-        **VALID_SETTINGS,
-        "citation": {
-            "default_style": "mla",
-            "supported_styles": ["nature", "apa"],
-        },
-    }
-
-    result = validate_settings(settings)
-
-    assert result.valid is False
-    assert _messages_contain(result.errors, "citation.default_style")
-
-
 def test_non_mapping_input_is_an_error() -> None:
     result = validate_settings([])
 
@@ -171,26 +135,17 @@ def test_non_positive_dpi_is_an_error() -> None:
     assert _messages_contain(result.errors, "figures.default_dpi")
 
 
-def test_unknown_export_format_is_an_error() -> None:
-    settings = {**VALID_SETTINGS, "export": {"default_format": "docx"}}
-
-    result = validate_settings(settings)
-
-    assert result.valid is False
-    assert _messages_contain(result.errors, "export.default_format")
-
-
 def test_non_string_api_key_is_an_error() -> None:
-    settings = {**VALID_SETTINGS, "api_keys": {"scopus_key": 123}}
+    settings = {**VALID_SETTINGS, "api_keys": {"pubmed_email": 123}}
 
     result = validate_settings(settings)
 
     assert result.valid is False
-    assert _messages_contain(result.errors, "api_keys.scopus_key")
+    assert _messages_contain(result.errors, "api_keys.pubmed_email")
 
 
 def test_empty_api_key_is_valid() -> None:
-    settings = {**VALID_SETTINGS, "api_keys": {"scopus_key": ""}}
+    settings = {**VALID_SETTINGS, "api_keys": {"semantic_scholar_key": ""}}
 
     assert validate_settings(settings).valid is True
 
@@ -234,7 +189,7 @@ def test_validation_is_deterministic() -> None:
     settings = {
         "review": {"reviewer_count": "three", "mystery": 1},
         "llm": {"provider": "gpt4", "whatever": 2},
-        "search": {"real_sources": ["nope", "crossref"]},
+        "figures": {"default_dpi": "big"},
     }
 
     first = validate_settings(settings).to_dict()

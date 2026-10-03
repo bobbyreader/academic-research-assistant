@@ -1,80 +1,26 @@
 # 全局设置
-
-# 项目路径
-paths:
-  projects_dir: "projects"
-  templates_dir: "templates"
-  output_dir: "output"
-  scripts_dir: "scripts"
+#
+# 本文件只保留**当前有代码读取**的配置项。未被任何代码路径读取的键会在这里
+# 误导用户（宣称可配置，实则无效），因此已删除；计划中的键移至 ROADMAP.md
+# 的“计划中的配置项”一节，待实现后再移回此处。
 
 # API 配置（请替换为实际密钥）
 api_keys:
   pubmed_email: ""  # 用于 PubMed API
   semantic_scholar_key: ""  # Semantic Scholar API
-  scopus_key: ""  # Scopus API（可选）
-  elsevier_key: ""  # Elsevier API（可选，不要写入仓库）
   crossref_email: ""  # CrossRef 礼貌池
 
 # LLM 配置。密钥优先从环境变量读取，不要提交到仓库。
 llm:
   provider: "codex_cli"  # codex_cli、gemini 或 openai_compatible
   model: ""  # 留空则使用本机 Codex CLI 的默认模型
-  base_url: ""
-  timeout_seconds: 120
-
-# 检索设置
-search:
-  default_databases: ["crossref", "pubmed", "arxiv", "semantic_scholar"]
-  max_results_per_source: 50
-  default_year_range: ["2019", "2024"]
-  deduplication_fields: ["doi", "title"]
-  real_sources: ["crossref", "pubmed", "semantic_scholar", "arxiv"]
-
-# 引用格式
-citation:
-  default_style: "nature"
-  supported_styles: ["nature", "apa", "ieee", "vancouver", "chicago"]
-  export_formats: ["ris", "bib", "nbib", "enw"]
+  base_url: ""  # 留空则使用对应 provider 的默认地址
+  timeout_seconds: 120  # 单次 LLM 请求超时（秒）
 
 # 图表设置
 figures:
-  default_journal: "nature"
-  default_dpi: 300
-  default_format: "pdf"
-  color_palette: "okabe_ito"
-  font_family: "Arial"
-  font_size_pt: 7
-
-# 写作设置
-writing:
-  default_paper_type: "research_paper"
-  default_language: "en"
-  bilingual_abstract: true  # 中英文摘要
-  style_guide: "nature"
+  default_dpi: 300  # 出版级图表分辨率
 
 # 审稿设置
 review:
   reviewer_count: 1  # 模拟审稿人数量（0 = 关闭评审阶段）；每增加一位多一次 LLM 调用
-  include_devil_advocate: true
-  consensus_threshold: 2  # 至少几位 reviewer 提出才列为共识
-  score_scale: [0, 100]
-
-# 学术诚信
-integrity:
-  mandatory_stages: ["stage_2_5_integrity_pre", "stage_4_5_integrity_final"]
-  citation_verification: true
-  cross_model_check: false  # 需设置 ARS_CROSS_MODEL
-  temporal_validation: true
-
-# 导出设置
-export:
-  default_format: "md"
-  pdf_engine: "xelatex"
-  pptx_template: "default"
-  include_speaker_notes: true
-
-# 日志设置
-logging:
-  level: "INFO"
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  file: "workflow.log"

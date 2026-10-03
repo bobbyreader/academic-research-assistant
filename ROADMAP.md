@@ -45,6 +45,7 @@
 | **Phase 2** | 推断统计引擎、出版级图表、统计可追溯性关口、管线集成 | ✅ 完成 |
 | **Phase 3** | 顾问级模拟同行评审、基于真实产物的演示大纲 | ✅ 完成 |
 | **Phase 4** | CI（pytest/ruff/mypy）、打包（pyproject）、配置校验 | ✅ 完成 |
+| **Phase 5** | PDF 交付保障、配置诚实化、死枚举清理、端到端无断点审计 | ✅ 完成 |
 
 ---
 
@@ -95,6 +96,16 @@
 | `orchestrator` 的 `**options: object` 无法与目标签名匹配 | 类型不精确 |
 | 声明 Python 3.11 后暴露 `UP017`（应使用 `datetime.UTC`） | 声明真实最低版本后正确浮现的现代化项 |
 
+### Phase 5
+| 缺陷 | 性质 |
+|---|---|
+| PDF 兜底路径 WeasyPrint **依赖系统 Pango**，本机不可用 → 用户根本拿不到 PDF | 兜底即第二个故障点 |
+| `settings.yaml` 共 9 个 section，**代码只读 3 个**（`llm`/`api_keys`/`review`） | 配置文件成了最后一个说谎的地方 |
+| `WorkflowStage` 9 个成员**只用 5 个** | 声明但未使用 |
+| **删除枚举成员会让 3 个真实项目崩溃**：容错只覆盖了 `stage_status`，未覆盖 `current_stage` → `current_stage=None` → CLI `status`/`list` 崩溃 + Web `/api/projects` 500 | **真实断点**（本机 `projects/` 中的真实数据触发） |
+| `llm.timeout_seconds` 对 `openai_compatible`/`gemini` 生效，对 **`codex_cli`（默认 provider）无效** | 读取 ≠ 生效 |
+| 我的端到端测试台最初**绕过了 `ResearchService`**，导致项目状态从未被更新 | 测试台错误：状态归 Service 所有，端到端测试必须走用户真实链路 |
+
 ### 一次误报的澄清
 两位成员先后报告"测试顺序相关抖动"。判定性检查结果：**未安装随机化插件**（顺序固定）、
 可疑测试**连跑 10 次全过**、**文件顺序反转通过**、**5 次全量运行全过**。
@@ -135,10 +146,53 @@
 |---|---|---|
 | 静态检查 | `ruff check .` | 全部通过（ruff 版本锁定 `==0.16.0`，保证可复现） |
 | 类型检查 | `mypy` | 20 个源文件 0 问题 |
-| 测试 | `pytest` | 116 通过 / 1 跳过（跳过 = 环境缺 PDF 后端时正确降级） |
+| 测试 | `pytest` | 131 通过 / 0 跳过（PDF 走纯 Python 兜底后不再需要跳过） |
+
+### 端到端无断点审计
+
+`tests/test_end_to_end.py` 走**用户真实链路**
+（`Orchestrator → ResearchService → ResearchPipeline → 三重校验 → 评审 → 导出 → CLI → Web`），
+只对外部世界（文献 API / LLM / DOI 解析）打桩，并在**每个交接处**断言数据未断裂：
+
+| 交接 | 断言 |
+|---|---|
+| 检索 → 分析 | `literature.json` 非空且含真实 DOI |
+| 数据集 → 统计 | 产出推断检验（Welch t + Cohen's d），非仅描述统计 |
+| 数据集 → 图表 | 每个登记的图表**文件真实落盘**且非空 |
+| 写作 → 引用关口 | `passed == True` 且无未知标识 |
+| 写作 → 统计关口 | 关口**确实看到了**计算出的 p 值 |
+| 关口 → 手稿 | 统计表、图表清单、参考文献均出现在手稿中 |
+| 写作 → 评审 | 评审报告存在且有结论 |
+| 写作 → 演示大纲 | 大纲含真实统计与图表 |
+| 全部 → 导出 | MD 非空、PDF 以 `%PDF` 开头、PPTX 为合法 zip |
+| 状态 | `current_stage == export`，`export == ready_with_author_checks` |
+| CLI / Web | `status`/`list`/`/api/projects`/下载端点全部可用 |
+| 旧项目 | Phase-5 之前的 `state.json`（含已删阶段名）仍可驱动全部界面 |
 
 配置校验：`core/config_validation.py` 把 `config/settings.yaml` 视为不可信输入，
 在 `ResearchService` 产生**任何副作用之前**快速失败，并点名出错的键。
 
 **已知限制**：`pyproject.toml` 只做元数据 + 工具配置 + 依赖声明；应用按源码目录运行
 （`scripts/`、`web/`、`templates/`、`config/` 相对仓库根解析），wheel 分发尚未打包这些运行时资产。
+
+---
+
+## 七、计划中的配置项
+
+`config/settings.yaml` 只保留**当前有代码读取**的键——未被读取的键会误导用户，
+让他们以为自己能配置某件事。以下键已从配置文件中移除，未来的实现方向记录在此，
+而不是留在配置里。
+
+| 原键 | 现状 | 重新接回所需的实现 |
+|---|---|---|
+| `paths.*`（projects_dir / templates_dir / output_dir / scripts_dir） | 未读取；目录由仓库根硬编码解析 | 让 `ArtifactStore`、模板与脚本加载改从该节读取路径，并提供默认值 |
+| `search.*`（default_databases / max_results_per_source / default_year_range / deduplication_fields / real_sources） | 未读取；检索参数由调用方 / 环境变量决定 | 在 `ResearchService`/`LiteratureSearcher` 中接入检索配置，并把 `real_sources` 校验接回 `config_validation` |
+| `citation.*`（default_style / supported_styles / export_formats） | 未读取；引用格式固定 | 实现可选引用样式渲染器，并把样式导出格式接入导出层 |
+| `writing.*`（default_paper_type / default_language / bilingual_abstract / style_guide） | 未读取；写作提示词为固定常量 | 让 `ResearchPipeline` 的写作提示词按这些键参数化 |
+| `integrity.*`（mandatory_stages / citation_verification / cross_model_check / temporal_validation） | 未读取；可信性关口按确定性规则硬编码 | 把关口开关接入管线，并让 `mandatory_stages` 真正决定阻断点 |
+| `export.*`（default_format / pdf_engine / pptx_template / include_speaker_notes） | 未读取；导出参数由 `export_service` 的调用方决定 | 让 `export_service` 从该节读取默认格式与引擎（注意：由 `pdf-dev` 负责该文件） |
+| `logging.*`（level / format / file） | 未读取；日志在入口按库默认配置 | 在应用入口用该节初始化 `logging` |
+| `llm.model` / `llm.base_url` | **保留**（由 `ResearchService` 读取） | — |
+| `api_keys.scopus_key` / `api_keys.elsevier_key` | 未读取；无对应检索实现 | 实现 Scopus / Elsevier 检索源后接回 `LiteratureSearcher.from_config` |
+| `figures.default_journal` / `default_format` / `color_palette` / `font_family` / `font_size_pt` | 未读取；图表样式为固定常量 | 让 `figure_builder.build_figures` 接受这些样式参数并由配置驱动 |
+| `review.include_devil_advocate` / `consensus_threshold` / `score_scale` | 未读取；评审规则在 `peer_reviewer` 中固定 | 让 `peer_reviewer` 接受这些参数并在配置校验中保留 |

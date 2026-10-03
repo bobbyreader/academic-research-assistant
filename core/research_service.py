@@ -81,6 +81,16 @@ class ResearchService:
             if isinstance(review_settings, dict)
             else 1
         )
+        figure_settings = runtime_settings.get("figures", {})
+        figure_dpi = (
+            int(figure_settings.get("default_dpi", 300))
+            if isinstance(figure_settings, dict)
+            else 300
+        )
+        configured_timeout = (
+            llm_settings.get("timeout_seconds") if isinstance(llm_settings, dict) else None
+        )
+        llm_timeout = int(configured_timeout) if configured_timeout is not None else None
         configured_provider = llm_settings.get("provider") if isinstance(llm_settings, dict) else None
         selected_provider = provider or os.getenv("ARS_LLM_PROVIDER") or configured_provider
         configured_base_url = (
@@ -141,10 +151,12 @@ class ResearchService:
                     model=selected_model,
                     api_key=api_key,
                     base_url=selected_base_url,
+                    timeout=llm_timeout,
                     workspace_dir=self.projects_dir / project_name,
                 ),
                 progress=progress,
                 reviewer_count=reviewer_count,
+                figure_dpi=figure_dpi,
             )
             result = pipeline.run(
                 ResearchPipelineConfig(

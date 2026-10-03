@@ -8,6 +8,7 @@ import pytest
 from core.artifact_store import ArtifactStore
 from core.config_validation import ConfigValidationError
 from core.external_clients import PaperRecord, SearchReport
+from core.llm_client import build_llm_client
 from core.research_pipeline import (
     ResearchPipeline,
     ResearchPipelineConfig,
@@ -410,3 +411,105 @@ def test_invalid_settings_fail_fast_before_any_work(tmp_path: Path) -> None:
     state = state_manager.load("badcfg")
     assert state is not None
     assert state.stage_status[WorkflowStage.SEARCH] == "pending"
+
+
+def _legacy_state_payload() -> dict:
+    """历史 state.json 的等效载荷：含已删除阶段，且停在已删除的 current_stage。"""
+    return {
+        "name": "legacy",
+        "mode": "hybrid",
+        "current_stage": "polishing",  # 已删除的阶段
+        "stage_status": {
+            "brainstorming": "completed",
+            "search": "completed",
+            "lit_review": "completed",
+            "statistics": "pending",
+            "visualization": "pending",
+            "writing": "in_progress",
+            "polishing": "pending",  # 已删除的阶段
+            "review": "pending",  # 已删除的阶段
+            "export": "pending",
+        },
+        "created_at": "2024-01-01T00:00:00+00:00",
+        "updated_at": "2024-01-01T00:00:00+00:00",
+        "metadata": {},
+    }
+
+
+def test_load_tolerates_removed_stage_names(tmp_path: Path) -> None:
+    """旧 state.json 含已删除阶段名时仍可加载，且 current_stage 永不落空。
+
+    删除 WorkflowStage 成员是数据迁移：历史项目文件里可能残留
+    statistics/visualization/polishing/review，甚至当前阶段就停在已删除的
+    阶段上。加载必须跳过未知阶段并确定性地收敛 current_stage，否则
+    `state.current_stage.value`（CLI 与 Web）会在“加载成功”后崩溃。
+    """
+    projects_dir = tmp_path / "projects"
+    project_dir = projects_dir / "legacy"
+    project_dir.mkdir(parents=True)
+    (project_dir / "state.json").write_text(
+        json.dumps(_legacy_state_payload(), ensure_ascii=False), encoding="utf-8"
+    )
+
+    state = StateManager(projects_dir).load("legacy")
+
+    assert state is not None
+    # current_stage 必须落在有效成员上（当前阶段是已删除的 polishing）。
+    assert state.current_stage is WorkflowStage.WRITING
+    # 每个有效阶段都存在，且有效阶段的原始状态被保留。
+    assert set(state.stage_status) == set(WorkflowStage)
+    assert state.stage_status[WorkflowStage.BRAINSTORMING] == "completed"
+    assert state.stage_status[WorkflowStage.SEARCH] == "completed"
+    assert state.stage_status[WorkflowStage.LIT_REVIEW] == "completed"
+    assert state.stage_status[WorkflowStage.WRITING] == "in_progress"
+    assert state.stage_status[WorkflowStage.EXPORT] == "pending"
+
+
+def test_load_latest_checkpoint_tolerates_removed_stage_names(tmp_path: Path) -> None:
+    """checkpoint 与 state.json 一样容忍已删除的阶段名。"""
+    projects_dir = tmp_path / "projects"
+    checkpoint_dir = projects_dir / "legacy" / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "checkpoint_20240101_000000.json").write_text(
+        json.dumps(_legacy_state_payload(), ensure_ascii=False), encoding="utf-8"
+    )
+
+    state = StateManager(projects_dir).load_latest_checkpoint("legacy")
+
+    assert state is not None
+    assert state.current_stage is WorkflowStage.WRITING
+    assert set(state.stage_status) == set(WorkflowStage)
+    assert state.stage_status[WorkflowStage.WRITING] == "in_progress"
+
+
+def test_current_stage_falls_back_to_export_when_everything_completed(
+    tmp_path: Path,
+) -> None:
+    """未知 current_stage 且无 in_progress/未完成阶段时，收敛到 EXPORT。"""
+    projects_dir = tmp_path / "projects"
+    project_dir = projects_dir / "done"
+    project_dir.mkdir(parents=True)
+    payload = _legacy_state_payload()
+    payload["current_stage"] = "polishing"
+    payload["stage_status"] = {key: "completed" for key in payload["stage_status"]}
+    (project_dir / "state.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+    state = StateManager(projects_dir).load("done")
+
+    assert state is not None
+    assert state.current_stage is WorkflowStage.EXPORT
+
+
+def test_build_llm_client_honours_timeout_for_every_provider(tmp_path: Path) -> None:
+    """`llm.timeout_seconds` 必须对全部 provider 生效，而不只是默认的那几个。
+
+    codex_cli 是 settings.yaml 与 README 中的默认 provider；若它的分支忽略
+    timeout，则该配置项对多数用户形同虚设。
+    """
+    for provider in ("openai_compatible", "gemini", "codex_cli"):
+        client = build_llm_client(
+            provider=provider, api_key="test-key", timeout=42, workspace_dir=tmp_path
+        )
+        assert client.settings.timeout == 42, provider

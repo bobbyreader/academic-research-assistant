@@ -23,13 +23,6 @@ KNOWN_PROVIDERS = frozenset(
     {"codex_cli", "codex", "gemini", "openai_compatible", "openai", "compatible"}
 )
 
-# Sources recognised by the real literature searchers.
-KNOWN_SOURCES = frozenset({"crossref", "pubmed", "semantic_scholar", "arxiv"})
-
-# Export formats supported by the exporter.
-KNOWN_EXPORT_FORMATS = frozenset({"md", "pdf", "pptx"})
-
-
 class ConfigValidationError(ValueError):
     """Raised when settings cannot be used as configuration at all."""
 
@@ -102,51 +95,6 @@ def _validate_llm(section: object, out: SettingsValidation) -> None:
         out.warnings.append(f"未知配置项 llm.{key}，已忽略")
 
 
-def _validate_search(section: object, out: SettingsValidation) -> None:
-    """Validate search.* keys; items of real_sources must be known sources."""
-    if not isinstance(section, Mapping):
-        out.errors.append("search 必须是映射对象（section）")
-        return
-
-    real_sources = _get(section, "real_sources")
-    if real_sources is not None:
-        if not isinstance(real_sources, list):
-            out.errors.append(f"search.real_sources 必须是列表，当前为 {real_sources!r}")
-        else:
-            for index, source in enumerate(real_sources):
-                if source not in KNOWN_SOURCES:
-                    out.errors.append(
-                        f"search.real_sources[{index}] 不是受支持的来源 {source!r}，"
-                        f"可选值为 {sorted(KNOWN_SOURCES)}"
-                    )
-
-    for key in sorted(set(section) - {"real_sources"}):
-        out.warnings.append(f"未知配置项 search.{key}，已忽略")
-
-
-def _validate_citation(section: object, out: SettingsValidation) -> None:
-    """Validate citation.* keys; default_style must be a declared style."""
-    if not isinstance(section, Mapping):
-        out.errors.append("citation 必须是映射对象（section）")
-        return
-
-    default_style = _get(section, "default_style")
-    supported_styles = _get(section, "supported_styles")
-    if (
-        default_style is not None
-        and supported_styles is not None
-        and isinstance(supported_styles, list)
-        and default_style not in supported_styles
-    ):
-        out.errors.append(
-            f"citation.default_style {default_style!r} 不在 citation.supported_styles "
-            f"{supported_styles!r} 中"
-        )
-
-    for key in sorted(set(section) - {"default_style", "supported_styles"}):
-        out.warnings.append(f"未知配置项 citation.{key}，已忽略")
-
-
 def _validate_figures(section: object, out: SettingsValidation) -> None:
     """Validate figures.* keys; DPI must be a positive integer."""
     if not isinstance(section, Mapping):
@@ -175,23 +123,6 @@ def _validate_review(section: object, out: SettingsValidation) -> None:
         out.warnings.append(f"未知配置项 review.{key}，已忽略")
 
 
-def _validate_export(section: object, out: SettingsValidation) -> None:
-    """Validate export.* keys; the default format must be exportable."""
-    if not isinstance(section, Mapping):
-        out.errors.append("export 必须是映射对象（section）")
-        return
-
-    default_format = _get(section, "default_format")
-    if default_format is not None and default_format not in KNOWN_EXPORT_FORMATS:
-        out.errors.append(
-            f"export.default_format 必须是 {sorted(KNOWN_EXPORT_FORMATS)} 之一，"
-            f"当前为 {default_format!r}"
-        )
-
-    for key in sorted(set(section) - {"default_format"}):
-        out.warnings.append(f"未知配置项 export.{key}，已忽略")
-
-
 def _validate_api_keys(section: object, out: SettingsValidation) -> None:
     """Validate api_keys.* values; empty string means "not configured"."""
     if not isinstance(section, Mapping):
@@ -214,11 +145,8 @@ _SECTION_VALIDATORS: tuple[
     tuple[str, Callable[[object, SettingsValidation], None]], ...
 ] = (
     ("llm", _validate_llm),
-    ("search", _validate_search),
-    ("citation", _validate_citation),
     ("figures", _validate_figures),
     ("review", _validate_review),
-    ("export", _validate_export),
     ("api_keys", _validate_api_keys),
 )
 
