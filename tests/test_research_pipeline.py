@@ -2223,3 +2223,472 @@ def test_end_to_end_delivery_config_produces_complete_manuscript(tmp_path: Path)
     assert (
         tmp_path / "projects/delivery-e2e/artifacts/review/review_reports.md.v1"
     ).is_file()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 9 管线层修复（真实运行发现）
+# --------------------------------------------------------------------------- #
+
+#: Phase 9 真实项目——Run1 失败、Run2 失败、Run3 成功的对照数据。
+_REAL_PROJECT = (
+    Path(__file__).resolve().parent.parent / "projects" / "phase9-real-urban-heat"
+)
+
+
+def test_zero_numeric_columns_is_loudly_reported_not_silently_skipped(
+    tmp_path: Path,
+) -> None:
+    """缺陷 1：数据可用但**零数值列**时，统计与图表不能静默跳过。
+
+    真实证据：Run 1 的 CSV 顶部有 `#` 注释行 → `csv.DictReader` 把它当表头 →
+    列名全错 → 0 个数值列 → 统计与图表静默跳过，手稿里只剩「行数：34」，无任何
+    warning。本测试构造一个只有非数值列的 CSV，断言：
+    * `PipelineResult.warnings` 里有一条**明确可见**的说明；
+    * 该说明写进产出的 `research_analysis.md`（"跳过了"必须可见）；
+    * 绝不凭空产出统计表或图件（"没做"不能被读成"做了且没问题"）。
+    """
+    data = tmp_path / "nonnumeric.csv"
+    # 所有列都是文本（且取值数不构成可分组分类列），数值列识别结果为 0。
+    data.write_text(
+        "note,tag\n" + "\n".join(f"comment-{i},label-{i}" for i in range(6)) + "\n",
+        encoding="utf-8",
+    )
+    pipeline = ResearchPipeline(
+        ArtifactStore(tmp_path / "projects"),
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(body="# Draft\n\nA difference was observed [P1].\n"),
+        doi_resolver=FakeResolver(),
+        reviewer_count=0,
+    )
+    result = pipeline.run(
+        _config(project_name="nonumeric", data_path=data)
+    )
+
+    # 必须有一条明确可见的说明（进 warnings）。
+    assert any(
+        "未在数据中检测到数值列" in warning for warning in result.warnings
+    ), f"零数值列必须显式告警，实际 warnings={result.warnings}"
+
+    # 统计报告已落盘且如实记录 0 数值列、0 检验。
+    stats = json.loads(
+        (
+            tmp_path
+            / "projects/nonumeric/artifacts/analysis/statistics_report.json.v1"
+        ).read_text(encoding="utf-8")
+    )
+    assert stats["numeric_columns"] == []
+    assert stats["tests"] == []
+
+    # 手稿里的统计章节必须**如实**说"无数值列 / 未运行任何检验"——"没做"绝不能被
+    # 读成"做了且没问题"。系统附加的统计报告本身是诚实呈现（与改动前一致），
+    # 我们只要求它不声称跑过检验。
+    manuscript = result.manuscript_path.read_text(encoding="utf-8")
+    assert "- 数值列: 无" in manuscript
+    assert "（未运行任何检验）" in manuscript
+    # 零数值列 ⇒ 不产出任何图件，故手稿里没有图表清单。
+    assert "# 图表清单" not in manuscript
+
+
+def test_numeric_columns_warning_survives_resume_rehydration(tmp_path: Path) -> None:
+    """缺陷 1 的续跑一致性：重水化一个"零数值列"的 analysis 时，说明同样可见。
+
+    真实语义：`_rehydrate_analysis` 会从 `statistics_report.json` 还原 warnings，
+    但"未检测到数值列"是**管线层**的判断（不在 `StatisticsReport.warnings` 里），
+    若不在此单独补上，续跑结果就会比全新运行"更干净"——这正是本项目明令禁止的
+    不诚实呈现。故直接验证重水化路径。（注：`plan_resume` 对零图件的 analysis 会
+    拒绝复用，那是既有且正确的保守行为，与本断言无关。）
+    """
+    store = ArtifactStore(tmp_path / "projects")
+    data = tmp_path / "nonnumeric.csv"
+    data.write_text(
+        "note,tag\n" + "\n".join(f"comment-{i},label-{i}" for i in range(6)) + "\n",
+        encoding="utf-8",
+    )
+
+    first = ResearchPipeline(
+        store,
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(body="# Draft\n\nA difference was observed [P1].\n"),
+        doi_resolver=FakeResolver(),
+        reviewer_count=0,
+    ).run(_config(project_name="nonumeric-resume", data_path=data))
+    assert any("未在数据中检测到数值列" in w for w in first.warnings)
+
+    # 直接从产物重水化 analysis：说明必须被如实还原。
+    _, dataset, _ = ResearchPipeline(
+        store,
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(),
+        doi_resolver=FakeResolver(),
+    )._rehydrate_analysis("nonumeric-resume", data)
+
+    assert dataset.statistics is not None
+    assert dataset.statistics.numeric_columns == []
+    assert any(
+        "未在数据中检测到数值列" in warning for warning in dataset.warnings
+    ), "重水化零数值列的 analysis 时，说明必须同样可见（否则续跑显得更干净）"
+
+
+def test_search_report_persists_excluded_by_year_and_roundtrips(tmp_path: Path) -> None:
+    """缺陷 2：`excluded_by_year` 必须"落盘 → 读回 → 值不变"。
+
+    真实证据：`search_report.json` 的键集里没有 `excluded_by_year`，而
+    `ranking_reasons` 的散文仍写着"N 篇被排除" → 续跑重水化时字段回落为 0，
+    字段与说明自相矛盾。本测试用一份 `excluded_by_year=2` 的检索结果跑完整管线，
+    断言该键落盘为非 0，且重水化后与原值一致。
+    """
+    from core.resume import RunFingerprint, plan_resume
+
+    class YearFilteringSearcher(FakeSearcher):
+        """产出一份带年份排除计数的检索报告（形状与真实产物一致）。"""
+
+        def search(
+            self,
+            query: str,
+            sources: list[str],
+            max_results: int,
+            year_range: tuple[int, int] | list[int] | None = None,
+        ) -> SearchReport:
+            base = super().search(query, sources, max_results, year_range=year_range)
+            base.total_found = 5
+            base.deduplicated_count = 4
+            base.dropped_by_limit = 1
+            base.excluded_by_year = 2
+            base.ranking_reasons = [
+                (
+                    "排序依据（高→低）：引用数；共 4 篇范围内候选，保留前 3 篇；"
+                    "另有 2 篇**年份已知且落在范围外**的文献（绝不静默丢弃）。"
+                )
+            ]
+            return base
+
+    store = ArtifactStore(tmp_path / "projects")
+    first = ResearchPipeline(
+        store,
+        searcher=YearFilteringSearcher(),
+        llm_client=FakeLLM(body="# Draft\n\nA difference was observed [P1].\n"),
+        doi_resolver=FakeResolver(),
+        reviewer_count=0,
+    ).run(_config(project_name="yearwin"))
+
+    report_path = (
+        tmp_path / "projects/yearwin/artifacts/search/search_report.json.v1"
+    )
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert "excluded_by_year" in payload, (
+        "search_report.json 必须持久化 excluded_by_year，否则与 ranking_reasons "
+        "的散文自相矛盾"
+    )
+    assert payload["excluded_by_year"] == 2
+    # 结果对象上也如实携带。
+    assert first.papers  # 检索成功
+
+    # 重水化后必须与原值一致（续跑路径）。
+    fingerprint = RunFingerprint.build(
+        topic="climate adaptation",
+        sources=["crossref"],
+        max_results=2,
+        data_path=None,
+        reviewer_count=0,
+        figure_dpi=300,
+    )
+    decision = plan_resume(
+        artifact_store=store,
+        project_name="yearwin",
+        fingerprint=fingerprint,
+        previous_steps={"search": fingerprint},
+        enabled=True,
+    )
+    assert decision.can_skip("search"), "search 产物应可复用"
+    second = ResearchPipeline(
+        store,
+        searcher=YearFilteringSearcher(),
+        llm_client=FakeLLM(body="# Draft\n\nA difference was observed [P1].\n"),
+        doi_resolver=FakeResolver(),
+        reviewer_count=0,
+        resume=decision,
+    ).run(_config(project_name="yearwin"))
+    assert "search" in second.reused_steps
+    # 直接调用重水化，断言字段被读回（0 → 2 的断链已修复）。
+    rehydrated = ResearchPipeline(
+        store,
+        searcher=YearFilteringSearcher(),
+        llm_client=FakeLLM(),
+        doi_resolver=FakeResolver(),
+    )._rehydrate_search("yearwin")
+    assert rehydrated.excluded_by_year == 2, "重水化后 excluded_by_year 必须与原值一致"
+
+
+def test_reused_stage_emits_completed_progress_signal(tmp_path: Path) -> None:
+    """缺陷 3：复用阶段必须发出与"新执行完成"**等价**的进度信号。
+
+    真实证据：Run 3 完整跑通，`state.json` 里 `search` 仍是 `in_progress`；Run 2 里
+    已成功复用的 `search` 被标成 `blocked`。根因：复用分支只做 `mark_reused` +
+    收集产物，**不调** `self.progress`，于是状态机的 `active_stage` 停在初始的
+    `SEARCH`、没人把复用阶段标成 completed。
+
+    本测试断言：复用 search 时，管线发出 `progress("search", "completed")`。
+    """
+    from core.resume import RunFingerprint, plan_resume
+
+    store = ArtifactStore(tmp_path / "projects")
+    # 第一次运行，产出可复用的 search 产物。
+    ResearchPipeline(
+        store,
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(body="# Draft\n\nA difference was observed [P1].\n"),
+        doi_resolver=FakeResolver(),
+        reviewer_count=0,
+    ).run(_config(project_name="reuse-signal"))
+
+    fingerprint = RunFingerprint.build(
+        topic="climate adaptation",
+        sources=["crossref"],
+        max_results=2,
+        data_path=None,
+        reviewer_count=0,
+        figure_dpi=300,
+    )
+    decision = plan_resume(
+        artifact_store=store,
+        project_name="reuse-signal",
+        fingerprint=fingerprint,
+        previous_steps={"search": fingerprint},
+        enabled=True,
+    )
+    assert decision.can_skip("search")
+
+    seen: list[tuple[str, str]] = []
+
+    def on_progress(stage: str, status: str) -> None:
+        seen.append((stage, status))
+
+    second = ResearchPipeline(
+        store,
+        searcher=FakeSearcher(),
+        llm_client=FakeLLM(body="# Draft\n\nA difference was observed [P1].\n"),
+        doi_resolver=FakeResolver(),
+        reviewer_count=0,
+        resume=decision,
+        progress=on_progress,
+    ).run(_config(project_name="reuse-signal"))
+
+    assert "search" in second.reused_steps
+    assert ("search", "completed") in seen, (
+        "复用 search 时必须发出 ('search', 'completed') 进度信号，"
+        f"否则状态机会把它永远停在 in_progress；实际={seen}"
+    )
+
+
+def test_search_reuse_does_not_add_model_calls_or_searcher_calls(tmp_path: Path) -> None:
+    """缺陷 3 的非回归：发进度信号不得改变"复用即不重跑"的语义。
+
+    复用 search 时：不得新增**外部检索调用**；也不得重跑 search 阶段内的
+    **相关性关口**。因只记录 `search` 可复用，其下游阶段（analysis 等）仍会执行，
+    故这里断言的是"相对全新运行，模型调用恰好少掉 search 阶段的那一次相关性关口"。
+    """
+    from core.resume import RunFingerprint, plan_resume
+
+    store = ArtifactStore(tmp_path / "projects")
+    fresh_searcher = CountingSearcher()
+    fresh_llm = CountingLLM()
+    ResearchPipeline(
+        store,
+        searcher=fresh_searcher,
+        llm_client=fresh_llm,
+        doi_resolver=FakeResolver(),
+        reviewer_count=0,
+    ).run(_config(project_name="reuse-cost"))
+
+    fingerprint = RunFingerprint.build(
+        topic="climate adaptation",
+        sources=["crossref"],
+        max_results=2,
+        data_path=None,
+        reviewer_count=0,
+        figure_dpi=300,
+    )
+    decision = plan_resume(
+        artifact_store=store,
+        project_name="reuse-cost",
+        fingerprint=fingerprint,
+        previous_steps={"search": fingerprint},
+        enabled=True,
+    )
+    second_searcher = CountingSearcher()
+    second_llm = CountingLLM()
+    ResearchPipeline(
+        store,
+        searcher=second_searcher,
+        llm_client=second_llm,
+        doi_resolver=FakeResolver(),
+        reviewer_count=0,
+        resume=decision,
+    ).run(_config(project_name="reuse-cost"))
+
+    assert second_searcher.calls == 0, "复用 search 不得新增外部检索调用"
+    # 复用的 search 跳过其内部的相关性关口（恰 1 次 complete_json）；下游阶段照常
+    # 执行。故复用运行的模型调用恰比全新运行少 1 次。
+    assert fresh_llm.complete_json_calls - second_llm.complete_json_calls == 1, (
+        "复用 search 应恰好省掉 search 阶段内的相关性关口调用；"
+        f"fresh={fresh_llm.complete_json_calls} reused={second_llm.complete_json_calls}"
+    )
+
+
+def test_pipeline_config_has_no_dead_export_fields() -> None:
+    """缺陷 4：`ResearchPipelineConfig` 不得再持有**死字段**。
+
+    真实导出走 `orchestrator._export_pdf` → `export_pdf(manuscript, path, engine=...)`
+    与 `Orchestrator` 传给 `export_service`，**都不经过管线**。以下三个字段
+    （`export_pdf_engine` / `export_pptx_template` / `export_include_speaker_notes`）
+    被读取、被存进配置，却从不被任何代码读取——保留一个"看起来在用"的字段
+    = 把配置值搬到一个用不到它的地方，会让配置看起来生效（并骗过 Phase 8 门禁）。
+    """
+    for dead in (
+        "export_pdf_engine",
+        "export_pptx_template",
+        "export_include_speaker_notes",
+    ):
+        assert not hasattr(ResearchPipelineConfig, dead), (
+            f"{dead} 是死字段（赋值但从不被读），必须删除而非保留"
+        )
+    # `export_default_format` 仍进入管线指纹/透传，保留。
+    assert hasattr(ResearchPipelineConfig, "export_default_format")
+
+
+def test_statistics_verification_rehydration_restores_effect_and_sample_sizes(
+    tmp_path: Path,
+) -> None:
+    """缺陷 5：统计核验报告重水化时**不得丢弃**效应量/样本量计数（否则续跑为 0）。
+
+    与 `excluded_by_year` 同类：算了 → 落盘了 → 重水化时丢了。危险的正是方向——
+    0 看起来像"没有效应量"这个**真实结论**，而不是"我不知道"。本测试断言：
+    * 落盘 → 读回 → `computed_effect_sizes` / `computed_sample_sizes` 值与计数不变；
+    * claim 的 `kind` 不丢失（effect_size 不能回落成 p_value）。
+    """
+    from core.statistics_verifier import StatisticsClaim, StatisticsVerificationReport
+
+    report = StatisticsVerificationReport(
+        computed_p_values=[0.03, 0.001],
+        computed_effect_sizes=[-0.9021, 1.0],
+        computed_sample_sizes=[30],
+        claims=[
+            StatisticsClaim(
+                raw="r=1.0", operator="", value=1.0, matched=True, kind="effect_size"
+            ),
+            StatisticsClaim(
+                raw="n=30", operator="", value=30.0, matched=True, kind="sample_size"
+            ),
+        ],
+    )
+    # 落盘 -> 读回（模拟 json round-trip 的纯数据形态）。
+    import json as _json
+
+    payload = _json.loads(_json.dumps(report.to_dict()))
+
+    rebuilt = ResearchPipeline._statistics_verification_from_dict(payload)
+
+    assert rebuilt.computed_effect_sizes == [-0.9021, 1.0], (
+        "重水化必须回填 computed_effect_sizes，不能回落为 0/空"
+    )
+    assert rebuilt.computed_sample_sizes == [30], (
+        "重水化必须回填 computed_sample_sizes，不能回落为 0/空"
+    )
+    kinds = {claim.kind for claim in rebuilt.claims}
+    assert kinds == {"effect_size", "sample_size"}, (
+        "claim 的 kind 必须在重水化后保留（不能全部回落成 p_value）"
+    )
+
+
+def test_statistics_verification_missing_fields_raise_not_fabricate_zero() -> None:
+    """缺陷 5：旧产物**缺** `computed_effect_sizes`/`computed_sample_sizes` 时，
+    绝不默认成 0（0 是"已知为零"，缺失是"未知"）。
+
+    照 `claims` 的处理模式：缺失即视为产物不完整并抛错，由 `run()` 回退为
+    重新执行 writing（"无法确认"一律退化为"执行它"）。字段存在但为 `[]` 则是
+    "已知为零"，合法通过。
+    """
+    base = {
+        "passed": True,
+        "computed_p_values": [0.5],
+        "claims": [],
+        "claim_count": 0,
+        "unmatched_count": 0,
+    }
+
+    # 缺少那两个字段 → 抛错（不是静默 0）。
+    with pytest.raises(ResearchPipelineError, match="computed_effect_sizes"):
+        ResearchPipeline._statistics_verification_from_dict(base)
+
+    # 只缺 sample_sizes 也一样。
+    with pytest.raises(ResearchPipelineError, match="computed_sample_sizes"):
+        ResearchPipeline._statistics_verification_from_dict(
+            dict(base, computed_effect_sizes=[])
+        )
+
+    # 字段存在且为空 = 已知为零：合法通过，值为 []。
+    ok = ResearchPipeline._statistics_verification_from_dict(
+        dict(base, computed_effect_sizes=[], computed_sample_sizes=[])
+    )
+    assert ok.computed_effect_sizes == []
+    assert ok.computed_sample_sizes == []
+
+
+def test_statistics_verification_rehydration_roundtrips_real_artifact() -> None:
+    """逐字对照真实产物：Phase 9 真实 `statistics_verification.json.v1` 含效应量/
+    样本量计数；重水化后必须**逐值一致**（证明缺陷 5 在真实运行中确实发生）。
+    """
+    path = (
+        _REAL_PROJECT / "artifacts" / "writing" / "statistics_verification.json.v1"
+    )
+    if not path.exists():
+        pytest.skip("Phase 9 真实产物不在本次 checkout 中")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    # 真实产物确实携带这两个字段（证明"算了并落盘了"）。
+    assert payload["computed_effect_sizes"]
+    assert payload["computed_sample_sizes"] == [30]
+
+    rebuilt = ResearchPipeline._statistics_verification_from_dict(payload)
+
+    assert rebuilt.computed_effect_sizes == payload["computed_effect_sizes"], (
+        "真实产物的效应量计数必须在重水化后逐值一致"
+    )
+    assert rebuilt.computed_sample_sizes == payload["computed_sample_sizes"], (
+        "真实产物的样本量计数必须在重水化后逐值一致"
+    )
+    assert {claim.kind for claim in rebuilt.claims} == {
+        claim["kind"] for claim in payload["claims"]
+    }
+
+
+@pytest.mark.skipif(
+    not (_REAL_PROJECT / "artifacts" / "search" / "search_report.json.v1").exists(),
+    reason="Phase 9 真实产物不在本次 checkout 中",
+)
+def test_real_run_search_report_missing_excluded_by_year_is_the_defect() -> None:
+    """逐字对照真实产物：证明缺陷 2 在真实运行中**确实发生**。
+
+    真实 `search_report.json` 的键集里没有 `excluded_by_year`。本测试把该事实
+    写死为断言（作为对照证据），不修改真实产物。
+    """
+    payload = json.loads(
+        (_REAL_PROJECT / "artifacts" / "search" / "search_report.json.v1").read_text(
+            encoding="utf-8"
+        )
+    )
+    expected = {
+        "counts_by_source",
+        "deduplicated_count",
+        "dropped_by_limit",
+        "errors",
+        "ranking_reasons",
+        "result_count",
+        "sources_attempted",
+        "total_found",
+    }
+    assert set(payload) == expected, (
+        "Phase 9 真实产物键集应恰好为这 8 个（不含 excluded_by_year）"
+    )
+    assert "excluded_by_year" not in payload, (
+        "真实运行中 excluded_by_year 确实丢失——这是缺陷 2 的逐字证据"
+    )

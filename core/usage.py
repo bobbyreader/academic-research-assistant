@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -142,7 +143,7 @@ class UsageReport:
         if reported == 0:
             return (
                 f"本次共 {total} 次模型调用，均未获得用量"
-                "（该 provider 不提供；不估算）。"
+                "（该 provider 不提供，或调用未能返回用量；不估算）。"
             )
 
         detail = (
@@ -156,16 +157,22 @@ class UsageReport:
         return (
             f"本次共 {total} 次模型调用，其中 {reported} 次由提供商上报用量："
             f"{detail}（这些数字只覆盖已上报的 {reported} 次调用）；"
-            f"另有 {unreported} 次调用未获得用量（该 provider 不提供）。"
+            f"另有 {unreported} 次调用未获得用量"
+            "（该 provider 不提供，或调用未能返回用量）。"
         )
 
     def warnings(self) -> list[str]:
-        """需要提请用户注意的事项，例如存在无法上报用量的调用。"""
+        """需要提请用户注意的事项，例如存在无法上报用量的调用。
+
+        未上报既可能因为"该 provider 不提供用量"，也可能因为"这次调用失败了、
+        结果与开销未知"。两种情形都必须如实提请用户注意——**不能把未知当成 0**。
+        """
         messages: list[str] = []
         unreported = self.unreported_calls
         if unreported:
             messages.append(
-                f"有 {unreported} 次模型调用未获得用量：提供商没有返回用量数据，"
+                f"有 {unreported} 次模型调用未获得用量：提供商没有返回用量数据"
+                "（该 provider 不提供，或调用未能返回用量），"
                 "因此上述 token 合计不包含这些调用；此处不做任何估算。"
             )
         return messages
@@ -282,30 +289,55 @@ class UsageTrackingClient:
         )
 
     def complete(self, system_prompt: str, user_prompt: str) -> str:
-        result = _invoke_complete(self._inner, system_prompt, user_prompt)
-        self._record("complete")
-        return result
+        return self._tracked("complete", _invoke_complete, system_prompt, user_prompt)
 
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
-        result = _invoke_complete_json(self._inner, system_prompt, user_prompt)
-        self._record("complete_json")
-        return result
+        return self._tracked("complete_json", _invoke_complete_json, system_prompt, user_prompt)
+
+    def _tracked(
+        self,
+        operation: str,
+        invoke: Callable[..., Any],
+        system_prompt: str,
+        user_prompt: str,
+    ) -> Any:
+        """调用内层客户端并记账；**无论成功或失败都要留下记录**。
+
+        记账放在 ``finally`` 中：异常路径也必须记录，"发起过这次调用"本身就是事实，
+        它的开销要么已上报、要么未知，但**绝不可能不存在**。
+
+        两种路径的记账口径**必须不同**：
+
+        * 成功路径调用 :meth:`_record` 读取 ``last_usage()``——此时读到的确实是本次
+          调用的用量（有用量记 ``reported=True``，没有记 ``reported=False``）。
+        * 失败路径调用 :meth:`_record_unreported`：**绝不读 ``last_usage()``**。失败时
+          内层客户端里残留的 ``last_usage()`` 是**上一次成功调用**的用量，读它会把
+          "未知"错误地记成"已上报且金额为上次数值"——用一处捏造覆盖另一处缺失，同样
+          是失真。故失败一律记 ``reported=False``（token 字段为 ``None``）：结果与
+          开销未知，而这**不等于 0**。
+
+        调用本身产生的异常原样透传（不吞、不改写）。
+        """
+        try:
+            result = invoke(self._inner, system_prompt, user_prompt)
+        except Exception:
+            # 失败路径：本次调用确实发起过，但既拿不到正文也拿不到用量。
+            # 记为"未上报"是对该事实的唯一诚实表达——"不知道花了多少"≠"没花钱"。
+            self._record_unreported(operation)
+            raise
+        else:
+            self._record(operation)
+            return result
 
     @property
     def report(self) -> UsageReport:
         return self._report
 
     def _record(self, operation: str) -> None:
+        """成功路径记账：读取内层 ``last_usage()``，如实区分已上报/未上报。"""
         usage = _read_last_usage(self._inner)
         if usage is None:
-            self._report.records.append(
-                UsageRecord(
-                    provider=self._report.provider,
-                    model=self._report.model,
-                    operation=operation,
-                    reported=False,
-                )
-            )
+            self._record_unreported(operation)
             return
         total = usage.total_tokens
         if total is None:  # 防御：即便内层给了 TokenCounts，也不臆造 total
@@ -321,6 +353,21 @@ class UsageTrackingClient:
                 total_tokens=total,
                 cached_input_tokens=usage.cached_input_tokens,
                 reasoning_output_tokens=usage.reasoning_output_tokens,
+            )
+        )
+
+    def _record_unreported(self, operation: str) -> None:
+        """记录一次**结果与开销未知**的调用（token 字段全为 ``None``）。
+
+        **刻意不读 ``last_usage()``**：失败路径下内层残留的是上一次成功调用的用量，
+        读它会凭空捏造一个"本次花了这么多"的数字。未知就记未知。
+        """
+        self._report.records.append(
+            UsageRecord(
+                provider=self._report.provider,
+                model=self._report.model,
+                operation=operation,
+                reported=False,
             )
         )
 

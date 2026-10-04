@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import math
 import re
 import xml.etree.ElementTree as ET
@@ -59,7 +60,21 @@ def _year(value: Any) -> int | None:
 
 
 def _strip_markup(value: str) -> str:
-    return re.sub(r"<[^>]+>", "", value).strip()
+    """剥离 XML/HTML 标签并**还原 HTML 实体**。
+
+    两步都是必要的：Crossref/arXiv 的元数据里既有 ``<jats:p>`` 之类的标签，也有
+    ``&amp;`` 之类的实体（真实样本中期刊名与摘要都出现过）。只剥标签会把裸实体
+    ``&amp;`` 留在记录里，因此在剥标签后再用标准库 :func:`html.unescape` 还原。
+
+    **已知取舍**：若某条记录**刻意**想展示字面量字符串 ``&amp;``（作者真的写了这
+    五个字符），也会被还原成 ``&``——``html.unescape`` 无法区分"编码器产生的实体"
+    与"刻意展示的裸实体"。真实投递中前者的概率远高于后者，且这个方向的还原是
+    期望语义，故接受该取舍，不为此引入跟踪实体来源的启发式复杂度。
+
+    调用点不止摘要：期刊名（``container-title``）同样经过本函数，否则真实数据里的
+    ``&amp;`` 会进入记录（见 :func:`CrossrefSource.search`）。
+    """
+    return html.unescape(re.sub(r"<[^>]+>", "", value)).strip()
 
 
 def _normalize_doi(value: Any) -> str:
@@ -106,7 +121,21 @@ class CrossrefSource:
         if self.email:
             params["mailto"] = self.email
         payload = self.transport.get_json("https://api.crossref.org/works", params=params)
-        items = payload.get("message", {}).get("items", [])
+        # 形状守卫：真实可达的校验失败响应体是
+        # ``{"status": "failed", "message-type": "validation-failure",
+        #   "message": [{"type": ..., "message": ...}]}``——其中 ``message`` 是**列表**，
+        # 不是 work-list 的对象。此时 ``message.get`` 会抛 ``AttributeError``，而
+        # ``LiteratureSearcher`` 的 except 元组**不含** ``AttributeError``（刻意如此：那是
+        # 编程错误的类型，不该被吞成"上游错误"）。因此必须在边界处显式校验形状并抛
+        # ``HttpClientError``——与紧邻的 ``items 不是列表`` 守卫同构，只是上扩一层。
+        message = payload.get("message") if isinstance(payload, dict) else None
+        if not isinstance(message, dict):
+            message_type = payload.get("message-type") if isinstance(payload, dict) else None
+            raise HttpClientError(
+                "Crossref 返回的 message 不是对象，而是 "
+                f"{type(message).__name__}（message-type={message_type!r}）"
+            )
+        items = message.get("items", [])
         if not isinstance(items, list):
             raise HttpClientError("Crossref 返回的 items 不是列表")
 
@@ -119,7 +148,9 @@ class CrossrefSource:
                     title=_first(item.get("title")),
                     authors=_authors(item.get("author")),
                     year=_year(item.get("published", {}).get("date-parts")),
-                    journal=_first(item.get("container-title")),
+                    # 期刊名同样要剥标签 + 解码实体：真实样本里形如
+                    # "Theranostics of Respiratory &amp; Skin Diseases"。
+                    journal=_strip_markup(_first(item.get("container-title"))),
                     doi=_normalize_doi(item.get("DOI")),
                     abstract=_strip_markup(_text(item.get("abstract"))),
                     url=_text(item.get("URL")),
@@ -149,7 +180,20 @@ class PubMedSource:
         if self.email:
             params["email"] = self.email
         search_payload = self.transport.get_json(self.search_url, params=params)
-        ids = search_payload.get("esearchresult", {}).get("idlist", [])
+        esearch = search_payload.get("esearchresult") if isinstance(search_payload, dict) else None
+        if not isinstance(esearch, dict):
+            raise HttpClientError(
+                "PubMed 返回的 esearchresult 不是对象，而是 "
+                f"{type(esearch).__name__}"
+            )
+        # 真实可达：参数非法时 PubMed 返回 **HTTP 200**，但响应体是
+        # ``{"esearchresult": {"ERROR": "retmax is not a positive number"}}``，
+        # 且**没有 idlist 字段**。若不检测，``.get("idlist", [])`` 会得到 ``[]``，
+        # 于是"查询失败"被静默当成"零篇文献"，与真实的"没查到"不可区分。
+        # 必须在边界处把它抛成可读错误（进 ``SearchReport.errors``）。
+        if "ERROR" in esearch:
+            raise HttpClientError(f"PubMed 查询失败: {esearch['ERROR']}")
+        ids = esearch.get("idlist", [])
         if not ids:
             return []
         fetch_params = {"db": "pubmed", "id": ",".join(ids), "retmode": "xml"}

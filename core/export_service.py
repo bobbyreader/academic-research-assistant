@@ -409,6 +409,18 @@ def export_pdf(
         except (subprocess.CalledProcessError, OSError) as exc:
             detail = getattr(exc, "stderr", None) or getattr(exc, "stdout", None) or str(exc) or "未知错误"
             print(f"[WARN] PDF 导出: pandoc+xelatex 失败，改用 reportlab 回退: {detail.strip()}", file=sys.stderr)
+    else:
+        # engine == "auto" 且系统后端缺失：这是**静默降级**。产物看起来正常（合法
+        # PDF），但排版来自 reportlab 而非 Pandoc+XeLaTeX，用户必须被告知，否则会
+        # 误以为拿到了「高质量排版」的产物。降级本身是设计好的兜底，故只警告、不失败。
+        missing = [
+            name for name, path in (("pandoc", pandoc), ("xelatex", xelatex)) if not path
+        ]
+        print(
+            "[WARN] PDF 导出: 未在 PATH 中找到 "
+            f"{' 与 '.join(missing)}，已改用 reportlab 渲染（排版为回退样式，非 Pandoc+XeLaTeX）。",
+            file=sys.stderr,
+        )
 
     attempted.append("reportlab")
     try:

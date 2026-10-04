@@ -134,6 +134,13 @@ def verify_manuscript_claims(
     Returns:
         一个 :class:`core.claim_verifier.ClaimVerificationReport`；其 ``passed``
         仅为上报信息，绝不用于阻断流水线。
+
+        本函数在继承 :func:`core.claim_verifier.verify_claims` 的全部警告之外，
+        另行**点名**判定为 ``unsupported`` 的配对（见
+        :func:`_mis_citation_warning`）：只有笼统的 "N 条 unsupported" 计数时，
+        用户看不出**具体哪一句、引了哪篇**出了问题，形同不可见。点名后的文本会
+        经 `PipelineResult.warnings` 浮出。**不新增判断能力**：只把已由模型判定为
+        ``unsupported`` 的结果如实转述，绝不自行推断是否"引错了文献"。
     """
     extracted = extract_citing_claims(body)
     candidates = _resolve_citable(extracted, papers)
@@ -156,7 +163,48 @@ def verify_manuscript_claims(
     # 整批交给 Phase 5.1 的核验器：恰好一次模型调用，其余规则全部复用。
     # 该函数只对 [{"claim": str, "citation_ids": [str]}] 取用，忽略额外字段，
     # 因此原样传入抽取结果即可（未来若有 provenance 字段也会被透传）。
-    return verify_claims(llm_client, claims=candidates, papers=list(papers))
+    report = verify_claims(llm_client, claims=candidates, papers=list(papers))
+
+    # 让已经查出来的 unsupported 配对以**可见文本**浮出：点名到句与文献，
+    # 使它能进入 PipelineResult.warnings，而不是只躺在产物文件里。
+    detail = _mis_citation_warning(report)
+    if detail is not None:
+        report.warnings = [detail, *report.warnings]
+    return report
+
+
+def _mis_citation_warning(report: ClaimVerificationReport) -> str | None:
+    """把 ``unsupported`` 配对转述成一条点名警告；无则返回 ``None``。
+
+    只做转述，不做语义推断：文本明确说明这是**模型基于摘要的建议性判断**，可能
+    是"引用指错了文献"或"论断超出摘要范围"，二者都无法由本模块确定性区分，故
+    只提示人工核对，绝不阻断。被点名的配对形如
+    ``「句子前 40 字…」（引 P1）``，使用户不必打开产物文件也能定位问题。
+    """
+    unsupported = report.unsupported_claims
+    if not unsupported:
+        return None
+
+    locations: list[str] = []
+    for verdict in unsupported:
+        # 每个配对点名到（句子前缀 + 引用标识）；同一句可能有多条 unsupported 证据。
+        suspect_ids = [
+            item.citation_id
+            for item in verdict.evidence
+            if item.verdict == "unsupported"
+        ] or list(verdict.citation_ids)
+        excerpt = verdict.claim.strip().replace("\n", " ")
+        if len(excerpt) > 40:
+            excerpt = excerpt[:40] + "…"
+        for citation_id in suspect_ids:
+            locations.append(f"「{excerpt}」（引 {citation_id}）")
+
+    return (
+        f"正文级论断核验发现 {len(unsupported)} 条「句子—被引文献」配对缺乏摘要支持，"
+        "**可能引用指错了文献或论断超出被引摘要范围**（建议性提示，未阻断）："
+        + "、".join(locations)
+        + "。请人工核对 manuscript_claim_verification.md。"
+    )
 
 
 def render_manuscript_claim_markdown(report: ClaimVerificationReport) -> str:

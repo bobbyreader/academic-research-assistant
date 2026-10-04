@@ -1293,6 +1293,69 @@ def test_cli_explicit_sources_override_config(
     assert captured["max_results"] == 3, "显式 --max-results 必须覆盖配置默认值"
 
 
+def test_cli_prints_result_warnings_including_source_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """**用户可见性**：CLI 必须打印 `result.warnings`（其中首项是检索源失败）。
+
+    背景：`PipelineResult.warnings` 的第一项就是 `list(report.errors)`
+    （见 `core/research_pipeline.py`），即"哪些检索源失败了"。Web 端渲染了它
+    （`web/static/app.js`），但 CLI 此前只调 `report_resume/report_usage/
+    report_literature_limit`，**从不打印 warnings**——于是 CLI 用户看到"研究完成"
+    却不知道"3 个源里 2 个挂了"，属误导。
+
+    期望：CLI 输出中出现那条源失败信息。本测试**不 monkeypatch** `report_warnings`
+    （若存在则走真实实现；若不存在则 `main` 不会调用它，测试即失败——这正是
+    surface-dev 落地前的预期红）。
+    """
+    import orchestrator as orch_module
+
+    source_error = (
+        "semantic_scholar: HTTP 429 from "
+        "https://api.semanticscholar.org/graph/v1/paper/search"
+    )
+
+    class _ResultWithWarnings:
+        reused_steps: ClassVar[list[str]] = []
+        resume_plan: ClassVar[str] = ""
+        resume_note: ClassVar[str] = ""
+        usage_note: ClassVar[str] = ""
+        warnings: ClassVar[list[str]] = [source_error]
+
+    def fake_run(self, project_name, topic, **options):  # type: ignore[no-untyped-def]
+        return _ResultWithWarnings()
+
+    monkeypatch.setattr(orch_module.Orchestrator, "run_real_research", fake_run)
+    monkeypatch.setattr(
+        orch_module.Orchestrator, "export", lambda self, *a, **k: Path("x")
+    )
+    monkeypatch.setattr(orch_module.Orchestrator, "report_resume", lambda self, r: None)
+    monkeypatch.setattr(orch_module.Orchestrator, "report_usage", lambda self, r: None)
+    monkeypatch.setattr(
+        orch_module.Orchestrator, "report_literature_limit", lambda self, n: None
+    )
+    # 刻意**不** monkeypatch report_warnings：要么走真实实现，要么测试失败。
+    monkeypatch.setattr(
+        "sys.argv",
+        ["orchestrator.py", "--base-dir", str(tmp_path), "research", "cli_job",
+         "--topic", "a topic"],
+    )
+
+    orch_module.main()
+
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    # 断言的是**用户可见性**：那条源失败文本真的出现在 CLI 输出里。
+    # 刻意**不**断言"report_warnings 被调用过"——"被调用"只是内部连线，
+    # "内容抵达 stdout"才是生效。二者之别是本阶段反复出现的主题。
+    assert source_error in output, (
+        "CLI 必须把 result.warnings（含检索源失败）**原样打印**给用户；"
+        f"实际输出:\n{output}"
+    )
+
+
 def test_web_research_falls_back_to_config_sources(tmp_path: Path) -> None:
     """Web 未传 sources 时回退到配置 `search.default_sources`（与 CLI 一致）。"""
     _write_settings(tmp_path, "search:\n  default_sources: [pubmed]\n")

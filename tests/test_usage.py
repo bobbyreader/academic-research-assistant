@@ -419,13 +419,76 @@ def test_wrapper_propagates_exceptions_unchanged() -> None:
         tracked.complete_json("s", "u")
 
 
-def test_wrapper_does_not_record_failed_calls() -> None:
+def test_wrapper_records_failed_call_as_unreported_not_zero() -> None:
+    """失败路径：调用**发起过**，就必须留下一条记录，且不得计为 0 开销。
+
+    这是本模块最核心的承诺——"不知道花了多少" ≠ "没花钱"。真实事故：一次超时的
+    codex 调用被完全漏记，`usage_report.json` 写成 `calls: 0`，用户会以为这次没花钱。
+    因此这里钉死：失败调用必须记为 1 次「未上报」，而不是 0 次、也不是 0 开销。
+    """
     tracked = UsageTrackingClient(ExplodingClient(), provider="p", model="m")
 
     with pytest.raises(RuntimeError):
         tracked.complete("s", "u")
 
-    assert tracked.report.calls == 0
+    report = tracked.report
+    assert report.calls == 1
+    assert report.reported_calls == 0
+    assert report.unreported_calls == 1
+    # 未知不能被记成 0：token 字段必须是 None，合计才允许是 0（因为无任何已上报调用）。
+    assert all(record.reported is False for record in report.records)
+    assert all(record.prompt_tokens is None for record in report.records)
+    assert report.note() != "暂无模型调用记录。"
+    assert "1 次模型调用" in report.note()
+    assert report.warnings() != []
+
+
+def test_wrapper_records_failed_complete_json_operation() -> None:
+    """`complete_json` 的失败路径同样必须留下记录，且标明是哪种操作。"""
+    tracked = UsageTrackingClient(ExplodingClient(), provider="codex_cli", model="")
+
+    with pytest.raises(ValueError, match="bad json"):
+        tracked.complete_json("s", "u")
+
+    report = tracked.report
+    assert report.calls == 1
+    assert report.reported_calls == 0
+    assert report.records[0].operation == "complete_json"
+    assert report.records[0].reported is False
+    assert report.records[0].total_tokens is None
+
+
+def test_wrapper_records_failure_after_a_successful_reported_call() -> None:
+    """先成功一次（有用量）再失败一次：两条记录都在，且部分覆盖措辞如实。"""
+
+    class SucceedThenExplode:
+        def __init__(self) -> None:
+            self.step = 0
+
+        def complete(self, system_prompt: str, user_prompt: str) -> str:
+            self.step += 1
+            if self.step == 1:
+                return "ok"
+            raise RuntimeError("timeout")
+
+        def last_usage(self) -> TokenCounts | None:
+            return _usage(500, 100)
+
+    tracked = UsageTrackingClient(SucceedThenExplode(), provider="codex_cli", model="")
+    assert tracked.complete("s", "u") == "ok"
+    with pytest.raises(RuntimeError, match="timeout"):
+        tracked.complete("s", "u")
+
+    report = tracked.report
+    assert report.calls == 2
+    assert report.reported_calls == 1
+    assert report.unreported_calls == 1
+    # 合计只覆盖已上报那次；失败那次不得被算成 0 也不能被估出来。
+    assert report.prompt_tokens == 500
+    assert report.completion_tokens == 100
+    assert report.total_tokens == 600
+    assert "只覆盖已上报的 1 次调用" in report.note()
+    assert "另有 1 次调用未获得用量" in report.note()
 
 
 def test_wrapper_normalizes_none_provider_and_model() -> None:

@@ -1,0 +1,149 @@
+[
+  {
+    "name": "crossref_normal",
+    "url": "https://api.crossref.org/works?select=DOI%2Ctitle%2Cauthor%2Cpublished%2Ccontainer-title%2Cabstract%2CURL&rows=5&query.bibliographic=sleep+memory+consolidation",
+    "status": 200,
+    "bytes": 2233,
+    "file": "crossref_normal.json"
+  },
+  {
+    "name": "crossref_no_results",
+    "url": "https://api.crossref.org/works?select=DOI%2Ctitle%2Cauthor%2Cpublished%2Ccontainer-title%2Cabstract%2CURL&rows=5&query.bibliographic=zzqxnonexistenttopic987654321",
+    "status": 200,
+    "bytes": 186,
+    "file": "crossref_no_results.json"
+  },
+  {
+    "name": "crossref_chinese",
+    "url": "https://api.crossref.org/works?select=DOI%2Ctitle%2Cauthor%2Cpublished%2Ccontainer-title%2Cabstract%2CURL&rows=5&query.bibliographic=%E6%B7%B1%E5%BA%A6%E5%AD%A6%E4%B9%A0+%E5%8C%BB%E5%AD%A6%E5%9B%BE%E5%83%8F",
+    "status": 200,
+    "bytes": 4097,
+    "file": "crossref_chinese.json"
+  },
+  {
+    "name": "crossref_special_chars",
+    "url": "https://api.crossref.org/works?select=DOI%2Ctitle%2Cauthor%2Cpublished%2Ccontainer-title%2Cabstract%2CURL&rows=5&query.bibliographic=CRISPR%2FCas9+%26+%22off-target%22+%282020%29",
+    "status": 429,
+    "bytes": 0,
+    "file": "crossref_special_chars.json"
+  },
+  {
+    "name": "crossref_long_query",
+    "url": "https://api.crossref.org/works?select=DOI%2Ctitle%2Cauthor%2Cpublished%2Ccontainer-title%2Cabstract%2CURL&rows=5&query.bibliographic=machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning+machine+learning",
+    "status": 200,
+    "bytes": 2248,
+    "file": "crossref_long_query.json"
+  },
+  {
+    "name": "crossref_no_select",
+    "url": "https://api.crossref.org/works?select=&rows=5&query.bibliographic=gut+microbiome",
+    "status": 400,
+    "bytes": 883,
+    "file": "crossref_no_select.json"
+  },
+  {
+    "name": "crossref_many",
+    "url": "https://api.crossref.org/works?select=DOI%2Ctitle%2Cauthor%2Cpublished%2Ccontainer-title%2Cabstract%2CURL&rows=20&query.bibliographic=cancer",
+    "status": 200,
+    "bytes": 11259,
+    "file": "crossref_many.json"
+  },
+  {
+    "name": "pubmed_search_normal",
+    "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=sleep+memory+consolidation&retmode=json&retmax=5",
+    "status": 200,
+    "bytes": 818,
+    "file": "pubmed_search_normal.json"
+  },
+  {
+    "name": "pubmed_fetch_normal",
+    "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=34567890%2C28981470&retmode=xml",
+    "status": 200,
+    "bytes": 90478,
+    "file": "pubmed_fetch_normal.xml"
+  },
+  {
+    "name": "pubmed_search_no_results",
+    "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=zzqxnonexistenttopic987654321&retmode=json&retmax=5",
+    "status": 200,
+    "bytes": 322,
+    "file": "pubmed_search_no_results.json"
+  },
+  {
+    "name": "pubmed_search_chinese",
+    "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=%E6%B7%B1%E5%BA%A6%E5%AD%A6%E4%B9%A0&retmode=json&retmax=5",
+    "status": 200,
+    "bytes": 270,
+    "file": "pubmed_search_chinese.json"
+  },
+  {
+    "name": "pubmed_search_special",
+    "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=CRISPR%2FCas9+AND+%22off-target%22&retmode=json&retmax=5",
+    "status": 200,
+    "bytes": 273,
+    "file": "pubmed_search_special.json"
+  },
+  {
+    "name": "pubmed_search_long",
+    "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning&retmode=json&retmax=5",
+    "status": 200,
+    "bytes": 5693,
+    "file": "pubmed_search_long.json"
+  },
+  {
+    "name": "pubmed_search_letter",
+    "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=Comment+on+article%5Bpt%5D&retmode=json&retmax=5",
+    "status": 200,
+    "bytes": 344,
+    "file": "pubmed_search_letter.json"
+  },
+  {
+    "name": "arxiv_normal",
+    "url": "https://export.arxiv.org/api/query?search_query=all%3Asleep+memory+consolidation&max_results=5",
+    "status": 200,
+    "bytes": 13377,
+    "file": "arxiv_normal.xml"
+  },
+  {
+    "name": "arxiv_no_results",
+    "url": "https://export.arxiv.org/api/query?search_query=all%3Azzqxnonexistenttopic987654321&max_results=5",
+    "status": 200,
+    "bytes": 737,
+    "file": "arxiv_no_results.xml"
+  },
+  {
+    "name": "arxiv_chinese",
+    "url": "https://export.arxiv.org/api/query?search_query=all%3A%E6%B7%B1%E5%BA%A6%E5%AD%A6%E4%B9%A0&max_results=5",
+    "status": 200,
+    "bytes": 727,
+    "file": "arxiv_chinese.xml"
+  },
+  {
+    "name": "arxiv_special",
+    "url": "https://export.arxiv.org/api/query?search_query=all%3ACRISPR%2FCas9+AND+off-target&max_results=5",
+    "status": 200,
+    "bytes": 10215,
+    "file": "arxiv_special.xml"
+  },
+  {
+    "name": "arxiv_long",
+    "url": "https://export.arxiv.org/api/query?search_query=all%3Amachine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning&max_results=5",
+    "status": 500,
+    "bytes": 913,
+    "file": "arxiv_long.xml"
+  },
+  {
+    "name": "crossref_bad_rows",
+    "url": "https://api.crossref.org/works?query.bibliographic=test&rows=-1",
+    "status": 429,
+    "bytes": 0,
+    "file": "crossref_bad_rows.json"
+  },
+  {
+    "name": "pubmed_bad_request",
+    "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=test&retmode=json&retmax=-5",
+    "status": 200,
+    "bytes": 106,
+    "file": "pubmed_bad_request.json"
+  }
+]

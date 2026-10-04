@@ -1,0 +1,94 @@
+[
+  {
+    "name": "arxiv_error_500_headers",
+    "url": "https://export.arxiv.org/api/query?search_query=all%3Amachine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning+AND+machine+learning&max_results=5",
+    "status": 200,
+    "headers": {
+      "Connection": "close",
+      "Content-Length": "14464",
+      "content-type": "application/atom+xml; charset=utf-8",
+      "x-cloud-trace-context": "a3b0e0c5a02543e5ef3c98a766f2d397",
+      "server": "Google Frontend",
+      "via": "1.1 google, 1.1 varnish, 1.1 varnish",
+      "Fastly-Restarts": "1",
+      "Accept-Ranges": "bytes",
+      "Age": "0",
+      "Date": "Sun, 04 Oct 2026 11:27:31 GMT",
+      "X-Served-By": "cache-lga-kjfk8660031-LGA, cache-hhr-khhr2060052-HHR",
+      "X-Cache": "MISS, MISS",
+      "X-Cache-Hits": "0, 0",
+      "X-Timer": "S1791113231.252734,VS0,VE20327",
+      "Strict-Transport-Security": "max-age=300"
+    },
+    "bytes": 14464
+  },
+  {
+    "name": "crossref_normal_headers",
+    "url": "https://api.crossref.org/works?query.bibliographic=sleep&rows=1",
+    "status": 200,
+    "headers": {
+      "Date": "Sun, 04 Oct 2026 11:27:32 GMT",
+      "Content-Type": "application/json",
+      "Transfer-Encoding": "chunked",
+      "Connection": "close",
+      "access-control-expose-headers": "Link",
+      "access-control-allow-headers": "X-Requested-With, Accept, Accept-Encoding, Accept-Charset, Accept-Language, Accept-Ranges, Cache-Control",
+      "access-control-allow-origin": "*",
+      "server": "Jetty(9.4.40.v20210413)",
+      "x-rate-limit-limit": "3",
+      "x-rate-limit-interval": "1s",
+      "x-concurrency-limit": "3",
+      "x-api-pool": "polite-array",
+      "permissions-policy": "interest-cohort=()"
+    },
+    "bytes": 10600
+  },
+  {
+    "name": "pubmed_bad_request_headers",
+    "url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=test&retmode=json&retmax=-5",
+    "status": 200,
+    "headers": {
+      "Date": "Sun, 04 Oct 2026 11:27:32 GMT",
+      "Server": "Finatra",
+      "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
+      "Content-Security-Policy": "upgrade-insecure-requests",
+      "Referrer-Policy": "origin-when-cross-origin",
+      "Ncbi-Sid": "05C7A7A4EEC4B368_A0B2SID",
+      "Ncbi-Phid": "1D3392ECA6EEF6750000637DC9F64649.1.1.m_1",
+      "Content-Type": "application/json; charset=UTF-8",
+      "Cache-Control": "private",
+      "X-Ratelimit-Limit": "3",
+      "X-Ratelimit-Remaining": "2",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Expose-Headers": "X-RateLimit-Limit,X-RateLimit-Remaining",
+      "Set-Cookie": "ncbi_sid=05C7A7A4EEC4B368_A0B2SID; domain=.nih.gov; path=/; expires=Mon, 04 Oct 2027 11:27:33 GMT",
+      "Vary": "Accept-Encoding",
+      "X-Ua-Compatible": "IE=Edge",
+      "X-Xss-Protection": "1; mode=block",
+      "Transfer-Encoding": "chunked",
+      "Via": "1.1 google",
+      "Alt-Svc": "clear",
+      "Connection": "close"
+    },
+    "bytes": 106
+  },
+  {
+    "name": "semantic_scholar_no_key_headers",
+    "url": "https://api.semanticscholar.org/graph/v1/paper/search?query=sleep+memory&limit=3&fields=title",
+    "status": 429,
+    "headers": {
+      "Content-Type": "application/json",
+      "Content-Length": "174",
+      "Connection": "close",
+      "Date": "Sun, 04 Oct 2026 11:27:35 GMT",
+      "x-amz-apigw-id": "Et22NHctvHcENrg=",
+      "x-amzn-RequestId": "ae1b498e-78a7-46f1-93bb-581ed7c0474c",
+      "x-amzn-ErrorType": "TooManyRequestsException",
+      "X-Cache": "Error from cloudfront",
+      "Via": "1.1 49cec22ec3770cab39306aef146e4e90.cloudfront.net (CloudFront)",
+      "X-Amz-Cf-Pop": "LAX54-P10",
+      "X-Amz-Cf-Id": "Kt2lpi8k-43EFm8SaLLP0AQS-PgvsOg1H4nBkIzVG6OC8eTFfTL5AQ=="
+    },
+    "bytes": 174
+  }
+]

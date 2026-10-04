@@ -14,7 +14,13 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal, cast
 
 from core.artifact_store import ArtifactStore, resolve_paths, resolve_repo_path
-from core.config_loader import get_int, get_str, get_str_list, load_settings
+from core.config_loader import (
+    get_bool,
+    get_int,
+    get_str,
+    get_str_list,
+    load_settings,
+)
 from core.export_service import export_pdf, export_pptx, resolve_export_format
 from core.research_pipeline import PipelineResult
 from core.research_service import ResearchService
@@ -76,9 +82,21 @@ class Orchestrator:
         self.scripts_dir = self.paths["scripts_dir"]
         self.projects_dir.mkdir(parents=True, exist_ok=True)
         # 导出配置：``export.default_format`` 作未指定时的默认；
-        # ``citation.export_formats`` 作导出白名单（真实生效于 ``export()``）。
+        # ``citation.export_formats`` 作导出白名单（真实生效于 ``export()``）；
+        # ``export.pdf_engine`` 决定 PDF 后端（真实生效于 ``_export_pdf``）——此前
+        # 该键只被读到、从未传给 ``export_pdf``，是「改了配置却毫无影响」的死键。
         self.export_default_format = get_str(settings, "export.default_format")
         self.export_formats = get_str_list(settings, "citation.export_formats")
+        self.export_pdf_engine = get_str(settings, "export.pdf_engine")
+        # PPTX 导出参数（真实生效于 ``_export_pptx``）：
+        # ``export.pptx_template`` 仅在非空时作为 ``--template`` 传给导出脚本；
+        # ``export.include_speaker_notes`` 决定是否补 ``Notes:`` 演讲者备注。二者此前
+        # 分别被读到/存进配置载体却**从未被使用**——删除它们曾骗过 Phase 8 门禁，
+        # 这里让真正的消费者（``_export_pptx``）读取它们，使"配置 → 产物"成立。
+        self.export_pptx_template = get_str(settings, "export.pptx_template")
+        self.export_include_speaker_notes = get_bool(
+            settings, "export.include_speaker_notes"
+        )
 
         self.state_manager = StateManager(self.projects_dir)
         self.artifact_store = ArtifactStore(self.projects_dir)
@@ -179,6 +197,64 @@ class Orchestrator:
         note = getattr(result, "usage_note", "") or ""
         if note:
             print(f"[用量] {note}")
+
+    def report_warnings(self, result: PipelineResult) -> None:
+        """逐条、原样打印本次运行的 ``result.warnings``（无警告则什么都不打印）。
+
+        这些警告是管线**如实汇总**的事实（检索源报错、零结果源、重水化失败、缺数据、
+        用量异常等）；CLI 此前从不打印它们，导致用户对「只从 crossref 拿到 3 篇」这类
+        情况完全不知情。这里只读、不加工：不排序、不改写、不合并、不臆造，与
+        :meth:`report_usage` / :meth:`report_literature_limit` 同构。
+
+        为空时**不输出任何内容**（连空行也不输出），避免被误读成「本次没有警告」以外的
+        含义，也避免在成功路径上新增任何字节。
+        """
+        warnings = getattr(result, "warnings", None) or []
+        for message in warnings:
+            print(f"[警告] {message}")
+
+    def report_failure(self, project_name: str) -> None:
+        """失败路径的可理解结论：失败于哪个阶段、失败前已有哪些阶段完成。
+
+        成功路径根本不调用本方法（只在 ``except`` 中调用），因此成功路径输出逐字节不变。
+
+        事实来源只有 ``state.json``（由 ``ResearchService.run`` 在失败时落盘）：不再臆造
+        任何未发生的复用。Run 2 曾出现「用户只看到一行超时，既不知道复用了什么、也不知道
+        哪一步失败」，本方法即为修补该缺口。
+
+        只打印**可核对**的两件事：
+
+        * 失败阶段：``current_stage`` 且其状态为 ``blocked``/``cancelled``；
+        * 失败前已完成的阶段（其产物已保留在项目中），来自 ``stage_status == completed``。
+
+        刻意**不**把它称作「已复用」：阶段是否复用由运行前的输入指纹判定，失败时无从证明，
+        故只陈述「已完成且产物已保留」这一可核对事实。
+        """
+        try:
+            state = self.state_manager.load(project_name)
+        except (OSError, ValueError, UnicodeDecodeError):
+            return
+        if state is None:
+            return
+
+        failed_stage = state.current_stage
+        outcome = state.stage_status.get(failed_stage)
+        if outcome in {"blocked", "cancelled"}:
+            label = "用户取消" if outcome == "cancelled" else "失败"
+            print(
+                f"[续跑] 运行未完成，{label}于「{failed_stage.value}」阶段"
+                f"（状态: {outcome}）。"
+            )
+
+        done = [
+            stage.value
+            for stage in WorkflowStage
+            if state.stage_status.get(stage) == "completed"
+        ]
+        if done:
+            print(f"[续跑] 失败前已完成且产物已保留的阶段：{'、'.join(done)}。")
+        else:
+            print("[续跑] 失败前没有任何阶段完成（无可沿用的旧产物）。")
 
     def report_literature_limit(self, project_name: str) -> None:
         """若有文献因总量上限被裁掉，打印一行说明（数量 + 排序依据摘要）。
@@ -379,13 +455,18 @@ class Orchestrator:
         state: ProjectState,
         artifacts: dict[str, list[Path]],
     ) -> None:
-        """将最新手稿导出为 PDF。"""
+        """将最新手稿导出为 PDF。
+
+        引擎取自 ``export.pdf_engine``（``auto``/``pandoc``/``reportlab``），缺省时
+        回退 ``auto``（与改动前逐字节一致）。用户显式选择 ``pandoc`` 而工具缺失时，
+        ``export_pdf`` 会**显式失败且不回退**——这正是让该配置「真实生效」的证据。
+        """
         manuscript = self.artifact_store.get_artifact(
             state.name, "writing", "manuscript.md"
         )
         if manuscript is None:
             raise ValueError("没有可导出的 writing/manuscript.md")
-        export_pdf(manuscript, output_path)
+        export_pdf(manuscript, output_path, engine=self.export_pdf_engine or "auto")
 
     def _export_pptx(
         self,
@@ -402,6 +483,11 @@ class Orchestrator:
         )
         if manuscript is None:
             raise ValueError("没有可导出的 writing/manuscript.md")
+        # ``export.pptx_template`` 非空时作为模板传给导出脚本；为空（缺省）时不传，
+        # 与改动前逐字节一致（脚本回落到内置空白模板）。
+        template_path = (
+            Path(self.export_pptx_template) if self.export_pptx_template else None
+        )
         export_pptx(
             outline or manuscript,
             output_path,
@@ -409,6 +495,8 @@ class Orchestrator:
             # "scripts"，相对仓库根，解析结果与改动前 ``Path(__file__).parent /
             # "scripts"`` 一致）。
             self.scripts_dir / "export_pptx.py",
+            template_path=template_path,
+            include_speaker_notes=self.export_include_speaker_notes,
         )
 
 
@@ -556,6 +644,7 @@ def main() -> None:
             )
             orchestrator.report_resume(result)
             orchestrator.report_usage(result)
+            orchestrator.report_warnings(result)
             orchestrator.report_literature_limit(args.project_name)
             # argparse cannot narrow a free-form string to a Literal, and
             # --export accepts arbitrary values; Orchestrator.export validates.
@@ -583,6 +672,11 @@ def main() -> None:
                 args.output,
             )
     except (FileNotFoundError, FileExistsError, ValueError, RuntimeError) as e:
+        # 失败路径：先给出可核对的结论（失败于哪一阶段、已有哪些产物保留），再报错。
+        # 只在 `research` 命令上做——此时才有「一次运行」失败可言；`status`/`export`
+        # 等命令的参数名不同或无项目名，不应误报。成功路径不经过这里，输出不变。
+        if args.command == "research":
+            orchestrator.report_failure(args.project_name)
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:

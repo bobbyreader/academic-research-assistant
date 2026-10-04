@@ -145,10 +145,12 @@ class ResearchService:
             settings, "review.consensus_threshold"
         )
         review_score_scale = get_str(settings, "review.score_scale")
+        # 注意：``export.pdf_engine`` / ``export.pptx_template`` /
+        # ``export.include_speaker_notes`` 只被**交付层**消费（``Orchestrator`` /
+        # ``export_service``），不进入管线，因此这里-不-读取，也不传给
+        # ``ResearchPipelineConfig``（后者刻意不持有这些字段）。留在这里只会让读者
+        # 以为"管线用到了它"。``export.default_format`` 例外：它是管线字段，下面照常传。
         export_default_format = get_str(settings, "export.default_format")
-        export_pdf_engine = get_str(settings, "export.pdf_engine")
-        export_pptx_template = get_str(settings, "export.pptx_template")
-        export_include_speaker_notes = get_bool(settings, "export.include_speaker_notes")
         active_stage = WorkflowStage.SEARCH
         state.stage_status[WorkflowStage.BRAINSTORMING] = "completed"
         state.stage_status[WorkflowStage.SEARCH] = "in_progress"
@@ -200,6 +202,16 @@ class ResearchService:
                 "writing": WorkflowStage.WRITING,
             }
             next_stage = stage_map.get(stage_name, active_stage)
+            # 单调性守卫：状态一旦 `completed` / `cancelled` 就**不再被覆盖或降级**。
+            # 否则异常路径（`except` 里把 `active_stage` 标成 "blocked"）会把一个**已经
+            # 成功**的阶段改写成失败——状态文件对事实说谎，而它正是续跑判定的输入之一。
+            if state.stage_status.get(next_stage) in {"completed", "cancelled"}:
+                active_stage = next_stage
+                state.current_stage = active_stage
+                self.state_manager.save(state)
+                if on_progress:
+                    on_progress(stage_name, status)
+                return
             if next_stage != active_stage:
                 state.stage_status[next_stage] = "in_progress"
             active_stage = next_stage
@@ -216,6 +228,70 @@ class ResearchService:
             self.state_manager.save(state)
             if on_progress:
                 on_progress(stage_name, status)
+
+        def completed_steps() -> set[str]:
+            raw = state.metadata.get(COMPLETED_STEPS_KEY)
+            return set(raw) if isinstance(raw, dict) else set()
+
+        #: 工作流主干顺序，用于定位"被中断时尚未进入的下一个阶段"。
+        _STAGE_ORDER: tuple[WorkflowStage, ...] = (
+            WorkflowStage.BRAINSTORMING,
+            WorkflowStage.SEARCH,
+            WorkflowStage.LIT_REVIEW,
+            WorkflowStage.WRITING,
+            WorkflowStage.EXPORT,
+        )
+
+        def _is_done(stage: WorkflowStage) -> bool:
+            """该阶段是否**确实成功过**。
+
+            依据是 ``COMPLETED_STEPS_KEY`` 的键集——它与续跑判定读的是**同一份事实**
+            （该阶段产物已产出并落盘指纹），因此状态标志与续跑不会互相矛盾。
+            """
+            return (
+                stage.value in completed_steps()
+                or state.stage_status.get(stage) in {"completed", "cancelled"}
+            )
+
+        def mark_failed(stage: WorkflowStage, outcome: str) -> None:
+            """把本次运行"没有成功"这件事如实记下；**已成功的阶段绝不改写**。
+
+            ``outcome`` 为 ``"blocked"``（异常）或 ``"cancelled"``（用户取消）。
+
+            两种情形分开处理，因为事实不同：
+
+            * ``stage`` **尚未成功** → 它才是失败/被取消的阶段：标 ``outcome``，
+              ``current_stage`` 指向它。（对应"在 search 阶段内失败"这类可归属情形。）
+            * ``stage`` **已经成功** → 运行是在"该阶段已成功、还没进入下一阶段"的
+              边界处停下的。此时**不得**把 ``stage`` 改写成失败（Run 2 的
+              ``search: blocked`` 就是这么把一次真实成功说成失败的）；但**也不能**不
+              留痕迹（否则 state 会显示"全部完成"，掩盖"这次其实没跑完"）。
+              因此把 ``outcome`` 记到**下一个尚未成功的阶段**上——那正是我们没能进入
+              的阶段——并让 ``current_stage`` 指向它。
+
+            无论哪种情形，都额外写一个 run 级标记 ``metadata["last_run_outcome"]``，
+            使状态文件永远能回答"上一次运行成功了吗、停在哪、为什么"。
+            """
+            if not _is_done(stage):
+                state.stage_status[stage] = outcome
+                state.current_stage = stage
+                stopped_at = stage
+            else:
+                # 该阶段确实成功过：保持 completed（不降级）。
+                state.stage_status[stage] = "completed"
+                stopped_at = stage
+                for candidate in _STAGE_ORDER:
+                    if not _is_done(candidate):
+                        state.stage_status[candidate] = outcome
+                        state.current_stage = candidate
+                        stopped_at = candidate
+                        break
+            state.metadata["last_run_outcome"] = {
+                "outcome": outcome,
+                "stopped_at": stopped_at.value,
+                "completed_stages": sorted(completed_steps()),
+            }
+            self.state_manager.save(state)
 
         searcher = LiteratureSearcher.from_config(
             pubmed_email=os.getenv(
@@ -277,9 +353,6 @@ class ResearchService:
                     review_consensus_threshold=review_consensus_threshold,
                     review_score_scale=review_score_scale,
                     export_default_format=export_default_format,
-                    export_pdf_engine=export_pdf_engine,
-                    export_pptx_template=export_pptx_template,
-                    export_include_speaker_notes=export_include_speaker_notes,
                     search_year_range=search_year_range,
                 )
             )
@@ -287,17 +360,23 @@ class ResearchService:
             # 取消是用户**主动行为**，不是错误：状态记为 `"cancelled"` 而非
             # `"blocked"`，并把状态落盘，然后原样重新抛出（调用方需知道运行未完成）。
             # 用量的落盘由管线在自己的 finally 中完成，此处不重复。
-            state.current_stage = active_stage
-            state.stage_status[active_stage] = "cancelled"
-            self.state_manager.save(state)
+            # mark_failed 保证：只有真正停在、且尚未成功的阶段才被标为 cancelled；
+            # 已成功的阶段不因取消而被回退（取消发生在阶段边界，不影响已完成阶段）。
+            mark_failed(active_stage, "cancelled")
             raise
         except Exception:
-            state.current_stage = active_stage
-            state.stage_status[active_stage] = "blocked"
-            self.state_manager.save(state)
+            # 只有**真正失败的那个阶段**才标 blocked，且 `current_stage` 指向它；
+            # 任何已成功（已完成并落盘）的阶段一律保持 completed，不被覆盖。
+            mark_failed(active_stage, "blocked")
             raise
 
         state.current_stage = WorkflowStage.EXPORT
         state.stage_status[WorkflowStage.EXPORT] = "ready_with_author_checks"
+        # run 级成功标记：与失败路径对称，使状态文件始终能回答"上一次运行成功了吗"。
+        state.metadata["last_run_outcome"] = {
+            "outcome": "completed",
+            "stopped_at": WorkflowStage.EXPORT.value,
+            "completed_stages": sorted(completed_steps()),
+        }
         self.state_manager.save(state)
         return result

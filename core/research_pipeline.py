@@ -103,10 +103,13 @@ class ResearchPipelineConfig:
     #: 评分刻度（如 "0-100" / "0-10"）。空串表示不追加刻度标注。
     review_score_scale: str = ""
     # --- export.* 参数化（缺省时导出产物不变） ------------------------------
+    #: 注意：本类**不**持有 ``export.pdf_engine`` / ``export.pptx_template`` /
+    #: ``export.include_speaker_notes``。导出完全发生在交付层
+    #: （``orchestrator._export_pdf`` / ``Orchestrator`` 传给 ``export_service``），
+    #: **不经过管线**。曾在此定义这三个字段却从不读取，是"把配置值搬到一个用不到
+    #: 它的地方"——它让配置看起来生效（Phase 8 的门禁因此被蒙混过去），实际到不了
+    #: 导出层。删除后由交付层直接读取 ``export.*``。
     export_default_format: str = ""
-    export_pdf_engine: str = ""
-    export_pptx_template: str = ""
-    export_include_speaker_notes: bool = False
     # --- search.* 年份窗口（(0, 0) 表示不限，透传给检索层） ------------------
     search_year_range: tuple[int, int] = (0, 0)
 
@@ -205,8 +208,34 @@ class ResearchPipeline:
             """该阶段是否被判定为可复用（`resume=None` 时永远为 False）。"""
             return self.resume is not None and self.resume.can_skip(step)
 
+        #: 复用阶段 → 应发出的进度标记。与 `core.resume._STEP_MARKERS` 同源：
+        #: 同一份"阶段名 → 进度回调标记"的映射，使状态机能对"来自复用"与
+        #: "新执行完成"作出**等价的**记录（该阶段已完成）。
+        reuse_markers: dict[str, str] = {
+            "search": "search",
+            "analysis": "lit_review",
+            "claims": "lit_review",
+            "writing": "writing",
+            "review": "writing",
+        }
+
         def mark_reused(step: str) -> None:
+            """记录某阶段被复用，并发出与"新执行完成"**等价**的进度信号。
+
+            复用分支只做 `mark_reused` + 收集产物，**不**调用 `self.progress`，
+            于是上层 `research_service` 的 `active_stage` 会停在初始的 `SEARCH`，
+            且没有人把复用的阶段标成 completed——Run 3 跑通后 `state.json` 里
+            `search` 仍是 `in_progress`、Run 2 里已成功复用的 `search` 被标成
+            `blocked`，根因即此。
+
+            修复：复用一个阶段，就发出与该阶段**新执行完成**时相同的进度标记。
+            这不修改状态机（`research_service` 不归本模块），只保证管线侧发出的
+            信号如实反映"该阶段已完成（来自复用）"。
+            """
             reused_steps.append(step)
+            marker = reuse_markers.get(step)
+            if marker is not None:
+                self.progress(marker, "completed")
 
         def check_continue() -> None:
             """在**阶段边界**检查是否继续；取消则抛出、停在边界。
@@ -269,6 +298,10 @@ class ResearchPipeline:
                     "total_found": report.total_found,
                     "deduplicated_count": report.deduplicated_count,
                     "dropped_by_limit": report.dropped_by_limit,
+                    # 因**年份窗口**被排除的条数。`ranking_reasons` 的散文里已经写着
+                    # "N 篇被排除"，若这里漏写该键，续跑重水化时字段会回落为 0，而
+                    # 散文仍写着 N → 字段与说明自相矛盾。故必须一同落盘。
+                    "excluded_by_year": report.excluded_by_year,
                     "ranking_reasons": list(report.ranking_reasons),
                 },
             )
@@ -717,6 +750,20 @@ class ResearchPipeline:
         )
 
     @staticmethod
+    def _no_numeric_columns_note() -> str:
+        """生成"未检测到数值列，统计与图表已跳过"的可核对说明（只说明，不臆造）。
+
+        统计引擎**确实执行过**、但一个数值列都没识别出来时，统计与图表都会跳过。
+        这一跳过必须**明确可见**：否则用户会把"没有统计结果"读成"数据没问题"。
+        """
+        return (
+            "未在数据中检测到数值列，统计与图表已跳过："
+            "本次**没有**产出任何推断统计检验或图件。"
+            "若数据中本应存在数值列，请检查 CSV 是否含注释行/多行表头等导致"
+            "列名识别错误的情况。"
+        )
+
+    @staticmethod
     def _dropped_by_limit_note(report: SearchReport) -> str:
         """生成"有文献因总量上限被裁掉"的可核对说明（只说明，不删除）。"""
         reasons = "；".join(report.ranking_reasons[:3]) or "未记录排序依据"
@@ -819,6 +866,12 @@ class ResearchPipeline:
                 report_payload.get("deduplicated_count"), len(papers)
             ),
             dropped_by_limit=self._optional_int(report_payload.get("dropped_by_limit"), 0),
+            # 与 dropped_by_limit 同一原则：字段必须"落盘 → 读回 → 值不变"。若此处
+            # 漏读，`ranking_reasons` 的散文仍写着"N 篇被年份排除"，而字段回落为 0，
+            # 字段与说明自相矛盾。
+            excluded_by_year=self._optional_int(
+                report_payload.get("excluded_by_year"), 0
+            ),
             ranking_reasons=(
                 [str(item) for item in ranking_reasons]
                 if isinstance(ranking_reasons, list)
@@ -896,6 +949,10 @@ class ResearchPipeline:
             report = self._statistics_report_from_dict(raw)
             dataset.statistics = report
             dataset.warnings.extend(report.warnings)
+            # 与全新运行一致：统计引擎执行过但零数值列时，那条可见说明也必须还原。
+            # 否则续跑结果会比全新运行"更干净"——这是不诚实的。
+            if not report.numeric_columns:
+                dataset.warnings.append(self._no_numeric_columns_note())
 
         figures_payload = self.artifact_store.get_artifact(
             project_name, "visualization", "figures.json"
@@ -1081,31 +1138,35 @@ class ResearchPipeline:
 
     @staticmethod
     def _statistics_verification_from_dict(payload: object) -> Any:
-        """重建统计陈述追溯报告。"""
-        from core.statistics_verifier import StatisticsClaim, StatisticsVerificationReport
+        """重建统计陈述追溯报告（委托冻结接口，绝不手工重建）。
+
+        **为什么必须委托 `from_dict`（Phase 9 缺陷）**：此前这里手写重建，只回填
+        `computed_p_values` 与 `claims`，于是 `computed_effect_sizes` /
+        `computed_sample_sizes` 被**丢弃**（回落为 `[]`），claim 的 `kind` 也被
+        丢弃（回落为 `p_value`）。后果：续跑后这两个计数**显示为 0** —— 而 0 看起来
+        像一个真实结论（"没有效应量/没有样本量"），不是"我不知道"。这与
+        `excluded_by_year` 是同一类缺陷：算了 → 落盘了 → 重水化时丢了。
+
+        **缺失必须与零区分**：若产物**根本不含**这两个字段（跨版本旧产物），
+        **绝不**默认成 0。照 `claims` 的处理模式——缺失即视为产物不完整并抛错，
+        由 `run()` 回退为**重新执行 writing**（"无法确认"一律退化为"执行它"，
+        这是安全方向）。注意：字段存在但为 `[]` 是**已知为零**，合法通过。
+        """
+        from core.statistics_verifier import StatisticsVerificationReport
 
         if not isinstance(payload, dict):
             raise ResearchPipelineError("statistics_verification.json 不是对象")
-        claims_payload = payload.get("claims", [])
-        claims = [
-            StatisticsClaim(
-                raw=str(item.get("raw", "")),
-                operator=str(item.get("operator", "")),
-                value=float(item.get("value", float("nan"))),
-                matched=bool(item.get("matched", False)),
-                note=str(item.get("note", "")),
-            )
-            for item in claims_payload
-            if isinstance(item, dict)
-        ] if isinstance(claims_payload, list) else []
-        report = StatisticsVerificationReport(
-            computed_p_values=[
-                float(value)
-                for value in payload.get("computed_p_values", [])
-            ],
-        )
-        report.claims = claims
-        return report
+        # 本版本产出的产物必然含这两个字段（见 `to_dict`）。缺失即结构不完整：
+        # 抛错 → 回退重跑，绝不把"未知"伪造成 0。
+        for required in ("computed_effect_sizes", "computed_sample_sizes"):
+            if required not in payload:
+                raise ResearchPipelineError(
+                    f"statistics_verification.json 缺少 {required}，"
+                    "无法确认续跑与原值一致，改为重新执行 writing 阶段。"
+                )
+        # 结构非法（类型错误）时 `from_dict` 抛 `ArtifactDecodeError`（`ValueError`），
+        # 同样由 `run()` 捕获并回退为重新执行 writing——单一实现，无漂移。
+        return StatisticsVerificationReport.from_dict(payload)
 
     def _rehydrate_review(
         self, project_name: str
@@ -1203,6 +1264,19 @@ class ResearchPipeline:
             report = analyze_statistics(data_path)
         except (StatisticsError, OSError, ValueError) as exc:
             result.warnings.append(f"统计分析未执行: {exc}")
+
+        # 数据可用、统计引擎**确实执行过**，但一个数值列都没识别出来 —— 这是
+        # 必须**明确可见**的事实："跳过了"绝不能被读成"做了且没问题"。
+        #
+        # 代码当时已经知道这件事（正因为没有数值列，它才没有产出任何检验与图件），
+        # 此前却只在 `statistics_report.md` 里留下一句泛泛的"未找到可辩护的检验
+        # 组合"，`PipelineResult.warnings` 与手稿里没有任何说明。真实证据：Run 1 的
+        # CSV 顶部有 `#` 注释行 → `csv.DictReader` 把它当表头 → 列名全错 → 0 个
+        # 数值列 → 统计与图表静默跳过，手稿里只剩"行数：34"，无任何 warning。
+        #
+        # 这不是新增判断能力，只是把"已经知道的事实"说出来。
+        if report is not None and not report.numeric_columns:
+            result.warnings.append(self._no_numeric_columns_note())
 
         if report is not None:
             result.statistics = report

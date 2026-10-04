@@ -458,3 +458,64 @@ def test_extract_never_returns_empty_claim_strings(body: str) -> None:
         assert item["claim"].strip() == item["claim"]
         assert item["claim"]
         assert item["citation_ids"]
+
+
+# --------------------------------------------------------------------------- #
+# 10. unsupported 配对必须以**点名 warning**浮出（本次修复核心）
+# --------------------------------------------------------------------------- #
+def test_unsupported_pairing_is_surfaced_as_a_named_warning() -> None:
+    """真实缺陷：手稿把圣地亚哥研究标成 [P1]，而 P1 是杜阿拉研究。
+
+    模型会把这判为 unsupported。本门必须让这条发现以**点名**警告浮出（句子前缀 +
+    引用标识），而不是只留一句笼统计数——否则用户看不到具体问题。
+    """
+    body = "[P1] 圣地亚哥研究通过耦合城市微气候与绿屋顶热质传递模型。[P1]"
+    sentence = "[P1] 圣地亚哥研究通过耦合城市微气候与绿屋顶热质传递模型"
+    llm = CountingLLM(
+        {
+            "verdicts": [
+                _verdict(
+                    0,
+                    "P1",
+                    "unsupported",
+                    claim=sentence,
+                    quote=P1_ABSTRACT,
+                    rationale="P1 研究地点不符。",
+                )
+            ]
+        }
+    )
+
+    report = verify_manuscript_claims(llm, body, _papers())
+
+    named = [w for w in report.warnings if "引用指错了文献" in w]
+    assert named, "unsupported 配对必须产生一条点名警告"
+    assert "P1" in named[0]
+    assert "圣地亚哥研究" in named[0]
+
+
+def test_supported_pairing_produces_no_named_warning() -> None:
+    body = "城市热岛会提高死亡率 [P1]。"
+    sentence = "城市热岛会提高死亡率 [P1]"
+    llm = CountingLLM(
+        {"verdicts": [_verdict(0, "P1", "supports", claim=sentence, quote=P1_ABSTRACT)]}
+    )
+
+    report = verify_manuscript_claims(llm, body, _papers())
+
+    assert not [w for w in report.warnings if "引用指错了文献" in w]
+
+
+def test_named_warning_truncates_long_claims() -> None:
+    sentence = "很长的论断丙" + "字" * 80 + " [P3]"
+    body = sentence + "。"
+    llm = CountingLLM(
+        {"verdicts": [_verdict(0, "P3", "unsupported", claim=sentence, quote=P3_ABSTRACT)]}
+    )
+
+    report = verify_manuscript_claims(llm, body, _papers())
+
+    named = [w for w in report.warnings if "引用指错了文献" in w]
+    assert named
+    assert "…" in named[0]
+    assert sentence not in named[0]

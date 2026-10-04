@@ -9,6 +9,7 @@ from core.statistics_engine import StatTestResult
 from core.statistics_verifier import (
     StatisticsClaim,
     StatisticsVerificationReport,
+    _reported_decimals,
     render_statistics_verification_markdown,
     verify_statistics,
 )
@@ -221,6 +222,180 @@ def test_eta_squared_has_no_symbol_so_no_effect_claim_is_extracted() -> None:
     report = verify_statistics("There were no effect-size symbols here.", [eta])
 
     assert [c for c in report.claims if c.kind == "effect_size"] == []
+
+
+# --------------------------------------------------------------------------- #
+# 覆盖率：真实手稿的四种形态必须被识别（本次修复核心）
+# --------------------------------------------------------------------------- #
+def _eta(p_value: float, *, n: int = 30, eta: float = 0.14) -> StatTestResult:
+    return StatTestResult(
+        test_name="One-way ANOVA",
+        variables=["score"],
+        groups=["a", "b", "c"],
+        n=n,
+        statistic=4.0,
+        p_value=p_value,
+        p_value_adjusted=p_value,
+        effect_size=eta,
+        effect_size_name="eta squared",
+    )
+
+
+def test_scientific_notation_p_value_is_recognised_and_matched() -> None:
+    report = verify_statistics("The effect was decisive (p = 3.57e-16).", [_welch(3.57e-16)])
+
+    assert report.claim_count == 1
+    assert report.claims[0].matched is True
+    assert report.passed is True
+
+
+def test_scientific_notation_p_value_keeps_full_mantissa_precision() -> None:
+    # ``3.5745385179030436e-16`` must match at the *reported* magnitude, not at a
+    # bogus 16 + 16 decimals that can never round-trip.
+    report = verify_statistics(
+        "p = 3.5745385179030436e-16", [_welch(3.5745385179030436e-16)]
+    )
+
+    assert report.passed is True
+
+
+def test_scientific_notation_at_reported_precision_still_rejects_different_value() -> None:
+    report = verify_statistics("p = 3.57e-16", [_welch(3.57e-12)])
+
+    assert report.claim_count == 1
+    assert report.passed is False
+
+
+def test_reported_decimals_handles_scientific_and_plain_notation() -> None:
+    assert _reported_decimals("0.03") == 2
+    assert _reported_decimals("0.006677181726293035") == 18
+    assert _reported_decimals("30") == 0
+    # 3.5745385179030436e-16 -> last digit at 10^-(16+16) = 10^-32.
+    assert _reported_decimals("3.5745385179030436e-16") == 32
+    assert _reported_decimals("1e-5") == 5
+
+
+def test_negative_correlation_is_recognised() -> None:
+    report = verify_statistics("Spearman r=-0.9021134593993325", [_pearson(0.01, r=-0.9021134593993325)])
+
+    assert report.claim_count == 1
+    assert report.claims[0].kind == "effect_size"
+    assert report.claims[0].value == -0.9021134593993325
+    assert report.passed is True
+
+
+def test_eta_squared_statement_is_now_recognised_and_matched() -> None:
+    report = verify_statistics(
+        "eta squared=0.9371719993842926", [_eta(0.01, eta=0.9371719993842926)]
+    )
+
+    assert report.claim_count == 1
+    assert report.claims[0].kind == "effect_size"
+    assert report.claims[0].matched is True
+
+
+def test_eta_squared_statement_not_satisfied_by_cohens_d() -> None:
+    # Family isolation: an eta squared claim must never be satisfied by a d.
+    report = verify_statistics("eta squared = 0.5", [_welch(0.03, d=0.5)])
+
+    claims = [c for c in report.claims if c.kind == "effect_size"]
+    assert len(claims) == 1
+    assert claims[0].matched is False
+    assert report.passed is False
+
+
+def test_cjk_adjacent_p_value_is_recognised() -> None:
+    # ``Holm校正p=…``: the CJK ``正`` binds to ``p`` so ``\bp`` never matched.
+    report = verify_statistics("Holm校正p=0.006677181726293035", [_welch(0.006677181726293035)])
+
+    assert report.claim_count == 1
+    assert report.claims[0].kind == "p_value"
+    assert report.passed is True
+
+
+def test_cjk_adjacent_sample_size_is_recognised() -> None:
+    report = verify_statistics("单因素方差分析报告n=30", [_welch(0.03, n=30)])
+
+    assert report.claim_count == 1
+    assert report.claims[0].kind == "sample_size"
+    assert report.passed is True
+
+
+def test_ascii_prefixed_p_is_still_not_matched() -> None:
+    # The lookbehind must still reject ``ap = 0.5`` / ``pH``-like false positives.
+    report = verify_statistics("The gap = 0.5 is irrelevant.", [_welch(0.03)])
+
+    assert report.claim_count == 0
+    assert report.passed is True
+
+
+def test_holm_adjusted_p_value_is_traceable() -> None:
+    # A manuscript legitimately quotes the multi-comparison-corrected p-value.
+    test = StatTestResult(
+        test_name="One-way ANOVA",
+        variables=["score"],
+        groups=["a", "b", "c"],
+        n=30,
+        statistic=4.0,
+        p_value=5.957564196505072e-17,
+        p_value_adjusted=3.5745385179030436e-16,
+        effect_size=0.94,
+        effect_size_name="eta squared",
+    )
+    report = verify_statistics("p = 3.5745385179030436e-16", [test])
+
+    assert report.passed is True
+
+
+# --------------------------------------------------------------------------- #
+# 覆盖率可见性：识别到 0 条必须浮出 warning
+# --------------------------------------------------------------------------- #
+def test_zero_claims_emits_a_coverage_warning() -> None:
+    report = verify_statistics("No statistics were reported here.", [_welch(0.2)])
+
+    assert report.claim_count == 0
+    assert report.coverage_warning is not None
+    assert any("识别到任何统计陈述" in w for w in report.warnings())
+
+
+def test_nonzero_claims_have_no_coverage_warning() -> None:
+    report = verify_statistics("p = 0.02", [_welch(0.02)])
+
+    assert report.coverage_warning is None
+    assert report.warnings() == []
+
+
+def test_claim_count_is_visible_in_dict_and_markdown() -> None:
+    report = verify_statistics("p = 0.03, d = 0.3, n = 10", [_welch(0.03, d=0.3, n=10)])
+
+    assert report.to_dict()["claim_count"] == 3
+    markdown = render_statistics_verification_markdown(report)
+    assert "正文识别到的统计陈述条数（覆盖率）: 3 处" in markdown
+
+
+def test_ran_false_never_passes_and_is_visible() -> None:
+    report = StatisticsVerificationReport(
+        computed_p_values=[0.03],
+        ran=False,
+        not_run_reason="上游未提供统计检验结果",
+    )
+
+    assert report.passed is False
+    assert any("未执行" in w for w in report.warnings())
+    markdown = render_statistics_verification_markdown(report)
+    assert "是否执行: 否" in markdown
+
+
+def test_legacy_payload_defaults_ran_true() -> None:
+    legacy = {
+        "passed": True,
+        "computed_p_values": [0.03],
+        "claims": [],
+    }
+    report = StatisticsVerificationReport.from_dict(legacy)
+
+    assert report.ran is True
+    assert report.not_run_reason == ""
 
 
 # --------------------------------------------------------------------------- #

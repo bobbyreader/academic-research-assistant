@@ -1,0 +1,161 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <id>https://arxiv.org/api/0xotrkV7EToTBVjWhmRWTohizRA</id>
+  <title>arXiv Query: search_query=all:sleep OR all:memory OR all:consolidation&amp;id_list=&amp;start=0&amp;max_results=5</title>
+  <updated>2026-10-04T11:25:50Z</updated>
+  <link href="https://arxiv.org/api/query?search_query=all:sleep+OR+(all:memory+OR+all:consolidation)&amp;start=0&amp;max_results=5&amp;id_list=" type="application/atom+xml"/>
+  <opensearch:itemsPerPage>5</opensearch:itemsPerPage>
+  <opensearch:totalResults>80724</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <entry>
+    <id>http://arxiv.org/abs/2506.21828v2</id>
+    <title>Fetal Sleep: A Cross-Species Review of Physiology, Measurement, and Classification</title>
+    <updated>2026-01-16T03:09:09Z</updated>
+    <link href="https://arxiv.org/abs/2506.21828v2" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2506.21828v2" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Study Objectives: Fetal sleep is a vital yet underexplored aspect of prenatal neurodevelopment. Its cyclic organization reflects the maturation of central neural circuits, and disturbances in these patterns may offer some of the earliest detectable signs of neurological compromise. This is the first review to integrate more than seven decades of research into a unified, cross-species synthesis of fetal sleep. We examine: (i) Physiology and Ontogeny-comparing human fetuses with animal models; and (ii) Methodological Evolution-transitioning from invasive neurophysiology to non-invasive monitoring and deep learning frameworks.
+  Methods: A structured narrative synthesis was guided by a systematic literature search across four databases (PubMed, Scopus, IEEE Xplore, and Google Scholar). From 2,925 identified records, 171 studies involving fetal sleep-related physiology, sleep-state classification, or signal-based monitoring were included in this review.
+  Results: Across the 171 studies, fetal sleep states become clearly observable as the brain matures. In fetal sheep and baboons, organized cycling between active and quiet sleep emerges at approximately 80%-90% gestation. In humans, this differentiation occurs later, around 95% gestation, with full maturation reached near term. Despite extensive animal research, no unified, clinically validated framework exists for defining fetal sleep states, limiting translation into routine obstetric practice.
+  Conclusions: By integrating evidence across species, methodologies, and clinical contexts, this review provides the scientific foundation for developing objective, multimodal, and non-invasive fetal sleep monitoring technologies-tools that may ultimately support earlier detection of neurological compromise and guide timely prenatal intervention.</summary>
+    <category term="q-bio.NC" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="eess.SP" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2025-06-27T00:15:57Z</published>
+    <arxiv:comment>Accepted for publication in Sleep. 56 pages, 3 figures, 7 tables</arxiv:comment>
+    <arxiv:primary_category term="q-bio.NC"/>
+    <arxiv:journal_ref>Sleep, 2026, zsag003</arxiv:journal_ref>
+    <author>
+      <name>Weitao Tang</name>
+    </author>
+    <author>
+      <name>Johann Vargas-Calixto</name>
+    </author>
+    <author>
+      <name>Nasim Katebi</name>
+    </author>
+    <author>
+      <name>Robert Galinsky</name>
+    </author>
+    <author>
+      <name>Gari D. Clifford</name>
+    </author>
+    <author>
+      <name>Faezeh Marzbanrad</name>
+    </author>
+    <arxiv:doi>10.1093/sleep/zsag003</arxiv:doi>
+    <link rel="related" href="https://doi.org/10.1093/sleep/zsag003" title="doi"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/1908.11463v2</id>
+    <title>Sleep Staging from Electrocardiography and Respiration with Deep Learning</title>
+    <updated>2019-09-16T00:01:16Z</updated>
+    <link href="https://arxiv.org/abs/1908.11463v2" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/1908.11463v2" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Study Objective: Sleep is reflected not only in the electroencephalogram but also in heart rhythms and breathing patterns. Therefore, we hypothesize that it is possible to accurately stage sleep based on the electrocardiogram (ECG) and respiratory signals. Methods: Using a dataset including 8,682 polysomnographs, we develop deep neural networks to stage sleep from ECG and respiratory signals. Five deep neural networks consisting of convolutional networks and long short-term memory networks are trained to stage sleep using heart and breathing, including the timing of R peaks from ECG, abdominal and chest respiratory effort, and the combinations of these signals. Results: ECG in combination with the abdominal respiratory effort achieve the best performance for staging all five sleep stages with a Cohen's kappa of 0.600 (95% confidence interval 0.599 -- 0.602); and 0.762 (0.760 -- 0.763) for discriminating awake vs. rapid eye movement vs. non-rapid eye movement sleep. The performance is better for young participants and for those with a low apnea-hypopnea index, while it is robust for commonly used outpatient medications. Conclusions: Our results validate that ECG and respiratory effort provide substantial information about sleep stages in a large population. It opens new possibilities in sleep research and applications where electroencephalography is not readily available or may be infeasible, such as in critically ill patients.</summary>
+    <category term="q-bio.QM" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="eess.SP" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="q-bio.NC" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2019-08-29T22:06:00Z</published>
+    <arxiv:comment>Contains supplementary material at the end. Sleep 2019</arxiv:comment>
+    <arxiv:primary_category term="q-bio.QM"/>
+    <author>
+      <name>Haoqi Sun</name>
+    </author>
+    <author>
+      <name>Wolfgang Ganglberger</name>
+    </author>
+    <author>
+      <name>Ezhil Panneerselvam</name>
+    </author>
+    <author>
+      <name>Michael J. Leone</name>
+    </author>
+    <author>
+      <name>Syed A. Quadri</name>
+    </author>
+    <author>
+      <name>Balaji Goparaju</name>
+    </author>
+    <author>
+      <name>Ryan A. Tesh</name>
+    </author>
+    <author>
+      <name>Oluwaseun Akeju</name>
+    </author>
+    <author>
+      <name>Robert J. Thomas</name>
+    </author>
+    <author>
+      <name>M. Brandon Westover</name>
+    </author>
+    <arxiv:doi>10.1093/sleep/zsz306</arxiv:doi>
+    <link rel="related" href="https://doi.org/10.1093/sleep/zsz306" title="doi"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2102.13284v4</id>
+    <title>A Large Collection of Real-world Pediatric Sleep Studies</title>
+    <updated>2022-06-22T20:33:40Z</updated>
+    <link href="https://arxiv.org/abs/2102.13284v4" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2102.13284v4" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Despite being crucial to health and quality of life, sleep -- especially pediatric sleep -- is not yet well understood. This is exacerbated by lack of access to sufficient pediatric sleep data with clinical annotation. In order to accelerate research on pediatric sleep and its connection to health, we create the Nationwide Children's Hospital (NCH) Sleep DataBank and publish it at Physionet and the National Sleep Research Resource (NSRR), which is a large sleep data common with physiological data, clinical data, and tools for analyses. The NCH Sleep DataBank consists of 3,984 polysomnography studies and over 5.6 million clinical observations on 3,673 unique patients between 2017 and 2019 at NCH. The novelties of this dataset include: 1) large-scale sleep dataset suitable for discovering new insights via data mining, 2) explicit focus on pediatric patients, 3) gathered in a real-world clinical setting, and 4) the accompanying rich set of clinical data. The NCH Sleep DataBank is a valuable resource for advancing automatic sleep scoring and real-time sleep disorder prediction, among many other potential scientific discoveries.</summary>
+    <category term="eess.SP" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="stat.AP" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2021-02-26T03:02:02Z</published>
+    <arxiv:comment>Dataset is available at https://sleepdata.org/datasets/nchsdb and https://physionet.org/content/nch-sleep</arxiv:comment>
+    <arxiv:primary_category term="eess.SP"/>
+    <arxiv:journal_ref>Sci Data 9, 421 (2022)</arxiv:journal_ref>
+    <author>
+      <name>Harlin Lee</name>
+    </author>
+    <author>
+      <name>Boyue Li</name>
+    </author>
+    <author>
+      <name>Shelly DeForte</name>
+    </author>
+    <author>
+      <name>Mark Splaingard</name>
+    </author>
+    <author>
+      <name>Yungui Huang</name>
+    </author>
+    <author>
+      <name>Yuejie Chi</name>
+    </author>
+    <author>
+      <name>Simon Lin Linwood</name>
+    </author>
+    <arxiv:doi>10.1038/s41597-022-01545-6</arxiv:doi>
+    <link rel="related" href="https://doi.org/10.1038/s41597-022-01545-6" title="doi"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2604.20943v1</id>
+    <title>SCM: Sleep-Consolidated Memory with Algorithmic Forgetting for Large Language Models</title>
+    <updated>2026-04-22T15:47:27Z</updated>
+    <link href="https://arxiv.org/abs/2604.20943v1" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2604.20943v1" rel="related" type="application/pdf" title="pdf"/>
+    <summary>We present SCM (Sleep-Consolidated Memory), a research preview of a memory architecture for large language models that draws on neuroscientific principles to address a fundamental limitation in current systems: the absence of persistent, structured, and biologically plausible memory. Existing approaches rely on truncating context windows, growing vector databases without bound, or tiered storage systems that lack consolidation and forgetting mechanisms. SCM implements five core components inspired by human memory: a limited-capacity working memory, multi-dimensional importance tagging, offline sleep-stage consolidation with distinct NREM and REM phases, intentional value-based forgetting, and a computational self-model enabling introspection. Across a standardized benchmark suite of eight tests, the prototype achieves perfect recall accuracy over ten-turn conversations while reducing memory noise by 90.9% through adaptive forgetting. Memory search latency remains below one millisecond even with hundreds of stored concepts. This work establishes the architectural foundations for memory systems that consolidate, prioritize, and forget, offering a testable platform for advancing LLM memory research.</summary>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2026-04-22T15:47:27Z</published>
+    <arxiv:comment>5 figures. Submitted April 2026</arxiv:comment>
+    <arxiv:primary_category term="cs.LG"/>
+    <author>
+      <name>Saish Sachin Shinde</name>
+    </author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2511.02766v4</id>
+    <title>Microbes in the Moonlight: How the Gut Microbiota Influences Sleep</title>
+    <updated>2025-12-09T23:10:02Z</updated>
+    <link href="https://arxiv.org/abs/2511.02766v4" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2511.02766v4" rel="related" type="application/pdf" title="pdf"/>
+    <summary>The gut microbiota has emerged as a fundamental regulator of sleep physiology, influencing neural, endocrine, and immune pathways through the gut-microbiota-brain axis (GMBA). This bidirectional communication system modulates neurotransmitter production, circadian rhythms, and metabolic homeostasis, while disruptions in microbial composition have been linked to sleep disorders, neuroinflammation, and systemic immune dysfunction. Recent findings suggest that gut dysbiosis contributes to sleep disturbances by altering serotonin, GABA, and short-chain fatty acid (SCFA) metabolism, with implications for neurodegenerative diseases, metabolic syndromes, and mood disorders. Additionally, the gut microbiota interacts with the endocrine and immune systems, shaping inflammatory responses and stress adaptation mechanisms. This review explores the intricate connections between sleep and the gut microbiota, integrating emerging research on microbiota-targeted therapies, such as probiotics, fecal microbiota transplantation (FMT), and chrononutrition, as potential interventions to restore sleep homeostasis and improve health outcomes</summary>
+    <category term="q-bio.NC" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2025-11-04T17:50:49Z</published>
+    <arxiv:comment>31 pages, 2 tables, 2 figures. Review article on the gut microbiota sleep axis</arxiv:comment>
+    <arxiv:primary_category term="q-bio.NC"/>
+    <author>
+      <name>Enso Onill Torres Alegre</name>
+    </author>
+  </entry>
+</feed>

@@ -1,0 +1,92 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <id>https://arxiv.org/api/N4ot7tzfzv0CdXnSCR7tt/f2aSE</id>
+  <title>arXiv Query: search_query=all:CRISPR/Cas9 AND all:off-target&amp;id_list=&amp;start=0&amp;max_results=5</title>
+  <updated>2026-10-04T11:25:53Z</updated>
+  <link href="https://arxiv.org/api/query?search_query=all:CRISPR/Cas9+AND+all:off-target&amp;start=0&amp;max_results=5&amp;id_list=" type="application/atom+xml"/>
+  <opensearch:itemsPerPage>5</opensearch:itemsPerPage>
+  <opensearch:totalResults>4</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <entry>
+    <id>http://arxiv.org/abs/2305.11917v2</id>
+    <title>Interpretable neural architecture search and transfer learning for understanding CRISPR/Cas9 off-target enzymatic reactions</title>
+    <updated>2023-09-29T16:36:45Z</updated>
+    <link href="https://arxiv.org/abs/2305.11917v2" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2305.11917v2" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Finely-tuned enzymatic pathways control cellular processes, and their dysregulation can lead to disease. Creating predictive and interpretable models for these pathways is challenging because of the complexity of the pathways and of the cellular and genomic contexts. Here we introduce Elektrum, a deep learning framework which addresses these challenges with data-driven and biophysically interpretable models for determining the kinetics of biochemical systems. First, it uses in vitro kinetic assays to rapidly hypothesize an ensemble of high-quality Kinetically Interpretable Neural Networks (KINNs) that predict reaction rates. It then employs a novel transfer learning step, where the KINNs are inserted as intermediary layers into deeper convolutional neural networks, fine-tuning the predictions for reaction-dependent in vivo outcomes. Elektrum makes effective use of the limited, but clean in vitro data and the complex, yet plentiful in vivo data that captures cellular context. We apply Elektrum to predict CRISPR-Cas9 off-target editing probabilities and demonstrate that Elektrum achieves state-of-the-art performance, regularizes neural network architectures, and maintains physical interpretability.</summary>
+    <category term="q-bio.MN" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2023-05-18T23:49:42Z</published>
+    <arxiv:comment>23 pages, 4 figures</arxiv:comment>
+    <arxiv:primary_category term="q-bio.MN"/>
+    <author>
+      <name>Zijun Zhang</name>
+    </author>
+    <author>
+      <name>Adam R. Lamson</name>
+    </author>
+    <author>
+      <name>Michael Shelley</name>
+    </author>
+    <author>
+      <name>Olga Troyanskaya</name>
+    </author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2101.01303v1</id>
+    <title>A small PAM optimises target recognition in the CRISPR-Cas immune system</title>
+    <updated>2021-01-05T01:27:24Z</updated>
+    <link href="https://arxiv.org/abs/2101.01303v1" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2101.01303v1" rel="related" type="application/pdf" title="pdf"/>
+    <summary>CRISPR-Cas is an adaptive immune mechanism that has been harnessed for a variety of genetic engineering applications: the Cas9 protein recognises a 2-5nt DNA motif, known as the PAM, and a programmable crRNA binds a target DNA sequence that is then cleaved. While off-target activity is undesirable, it occurs because cross-reactivity was beneficial in the immune system on which the machinery is based. Here, a stochastic model of the target recognition reaction was derived to study the specificity of the innate immune mechanism in bacteria. CRISPR systems with Cas9 proteins that recognised PAMs of varying lengths were tested on self and phage DNA. The model showed that the energy associated with PAM binding impacted mismatch tolerance, cleavage probability, and cleavage time. Small PAMs allowed the CRISPR to balance catching mutant phages, avoiding self-targeting, and quickly dissociating from critically non-matching sequences. Additionally, the results revealed a lower tolerance to mismatches in the PAM and a PAM-proximal region known as the seed, as seen in experiments. This work illustrates the role that the Cas9 protein has in dictating the specificity of DNA cleavage that can aid in preventing off-target activity in biotechnology applications.</summary>
+    <category term="physics.bio-ph" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="q-bio.BM" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2021-01-05T01:27:24Z</published>
+    <arxiv:comment>20 pages, 6 figures, 1 table</arxiv:comment>
+    <arxiv:primary_category term="physics.bio-ph"/>
+    <author>
+      <name>Melia E. Bonomo</name>
+    </author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2409.05938v1</id>
+    <title>DeepFM-Crispr: Prediction of CRISPR On-Target Effects via Deep Learning</title>
+    <updated>2024-09-09T17:33:54Z</updated>
+    <link href="https://arxiv.org/abs/2409.05938v1" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2409.05938v1" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Since the advent of CRISPR-Cas9, a groundbreaking gene-editing technology that enables precise genomic modifications via a short RNA guide sequence, there has been a marked increase in the accessibility and application of this technology across various fields. The success of CRISPR-Cas9 has spurred further investment and led to the discovery of additional CRISPR systems, including CRISPR-Cas13. Distinct from Cas9, which targets DNA, Cas13 targets RNA, offering unique advantages for gene modulation. We focus on Cas13d, a variant known for its collateral activity where it non-specifically cleaves adjacent RNA molecules upon activation, a feature critical to its function. We introduce DeepFM-Crispr, a novel deep learning model developed to predict the on-target efficiency and evaluate the off-target effects of Cas13d. This model harnesses a large language model to generate comprehensive representations rich in evolutionary and structural data, thereby enhancing predictions of RNA secondary structures and overall sgRNA efficacy. A transformer-based architecture processes these inputs to produce a predictive efficacy score. Comparative experiments show that DeepFM-Crispr not only surpasses traditional models but also outperforms recent state-of-the-art deep learning methods in terms of prediction accuracy and reliability.</summary>
+    <category term="q-bio.QM" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.AI" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2024-09-09T17:33:54Z</published>
+    <arxiv:comment>11 page, 2 figures, accepted to ICMLA 2024</arxiv:comment>
+    <arxiv:primary_category term="q-bio.QM"/>
+    <author>
+      <name>Condy Bao</name>
+    </author>
+    <author>
+      <name>Fuxiao Liu</name>
+    </author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2511.11986v2</id>
+    <title>Comment on "Repair of DNA Double-Strand Breaks Leaves Heritable Impairment to Genome Function"</title>
+    <updated>2025-11-28T16:22:46Z</updated>
+    <link href="https://arxiv.org/abs/2511.11986v2" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2511.11986v2" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Bantele and colleagues recently reported that repair of a single CRISPR/Cas9-induced DNA double-strand break (DSB) in the c-MYC topologically associated domain leads to a persistent depletion of chromatin interactions and long-term transcriptional attenuation across multiple generations of human cells. They interpret this observation as evidence for a previously unrecognized principle--"chromatin fatigue"--in which DSB repair generates a stable architectural defect that acts as a heritable impairment to genome function. Such an idea, if correct, would carry profound implications for genome biology, epigenetic inheritance, cancer evolution, aging, and the safety of therapeutic genome editing. However, our detailed reassessment of the experimental design, underlying assumptions, and data interpretation reveals that the evidence provided is inadequate to support these sweeping conclusions. Instead, the observed outcomes are more plausibly explained by a combination of Cas9 persistence, off-target DNA damage, repair-factor retention, MYC enhancer plasticity, and the well-documented genomic instability of HeLa cells. The study does not demonstrate mechanistic causality, does not exclude simpler explanations, and does not provide data consistent with true chromatin memory or heritable architectural change. Moreover, its statistical inferences are based on noisy measurements that fall within expected variability of unstable oncogenic loci. Here, we present a comprehensive critical analysis showing that the proposed model of chromatin fatigue is unsupported by the available evidence. We offer a corrected interpretation in which the chromatin landscape experiences a temporary, repair-associated perturbation that resolves without leaving enduring or heritable impairment.</summary>
+    <category term="q-bio.CB" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="q-bio.SC" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2025-11-15T01:48:53Z</published>
+    <arxiv:comment>arXiv admin note: This submission has been withdrawn due to violation of arXiv policies for acceptable submissions</arxiv:comment>
+    <arxiv:primary_category term="q-bio.CB"/>
+    <author>
+      <name>Yi Wang</name>
+      <arxiv:affiliation>College of Chemical Engineering, Huaqiao University, Xiamen, China</arxiv:affiliation>
+    </author>
+    <author>
+      <name>Shu-Feng Zhou</name>
+      <arxiv:affiliation>College of Chemical Engineering, Huaqiao University, Xiamen, China</arxiv:affiliation>
+    </author>
+  </entry>
+</feed>

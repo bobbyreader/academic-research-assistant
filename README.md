@@ -259,6 +259,7 @@ Full phase detail and the audit log live in [ROADMAP.md](ROADMAP.md).
 | 6 | Deliverable-level verification (every statistics claim traceable; manuscript citations traced) | ✅ done |
 | 7 | Retrieval quality (query construction, transparent ranking, honest cap, relevance gate) | ✅ done |
 | 8 | Config keys re-connected (8 groups really effective; defaults match prior behaviour; every key read) | ✅ done |
+| 9 | Real-chain validation (first real search + real model run in two months; defects it exposed fixed) | ✅ done |
 
 ### 🧪 Development
 
@@ -527,6 +528,7 @@ academic-research-assistant/
 | 6 | 交付物级校验（统计陈述全量可追溯 + 正文引用语义追溯） | ✅ 已完成 |
 | 7 | 检索质量（查询构造、透明排序、上限语义、相关性校验） | ✅ 已完成 |
 | 8 | 配置项接回（8 组真实生效、默认值等于现状、每个键都被读取） | ✅ 已完成 |
+| 9 | 真实链路验收（两个月来第一次真检索+真模型端到端运行，并修复暴露的缺陷） | ✅ 已完成 |
 
 ### 🧪 开发
 
