@@ -252,6 +252,13 @@ Full phase detail and the audit log live in [ROADMAP.md](ROADMAP.md).
 | 2 | Inferential statistics, publication figures, statistics traceability gate | ✅ done |
 | 3 | Simulated peer review; presentation outline built from the real artifacts | ✅ done |
 | 4 | CI (pytest/ruff/mypy), packaging, config validation | ✅ done |
+| 5 | Guaranteed PDF delivery, honest config, dead-enum cleanup, no-breakpoint audit | ✅ done |
+| 5.1 | Claim-evidence traceability (the last gap in the core promise) | ✅ done |
+| 5.5 | Real checkpoint/resume (artifact- and input-fingerprint driven) | ✅ done |
+| 5.6 | Usage accounting that never estimates; visible queue; cooperative cancel | ✅ done |
+| 6 | Deliverable-level verification (every statistics claim traceable; manuscript citations traced) | ✅ done |
+| 7 | Retrieval quality (query construction, transparent ranking, honest cap, relevance gate) | ✅ done |
+| 8 | Config keys re-connected (8 groups really effective; defaults match prior behaviour; every key read) | ✅ done |
 
 ### 🧪 Development
 
@@ -513,6 +520,13 @@ academic-research-assistant/
 | 2 | 推断统计、出版级图表、统计可追溯性关口 | ✅ 已完成 |
 | 3 | 模拟同行评审；基于真实产物生成演示大纲 | ✅ 已完成 |
 | 4 | CI（pytest/ruff/mypy）、打包、配置校验 | ✅ 已完成 |
+| 5 | PDF 交付保障、配置诚实化、死枚举清理、端到端无断点审计 | ✅ 已完成 |
+| 5.1 | 论断—证据语义追溯（核心承诺的最后一块） | ✅ 已完成 |
+| 5.5 | 真实断点续跑（产物 + 输入指纹驱动） | ✅ 已完成 |
+| 5.6 | 用量统计（绝不估算）、队列可见、协作式取消 | ✅ 已完成 |
+| 6 | 交付物级校验（统计陈述全量可追溯 + 正文引用语义追溯） | ✅ 已完成 |
+| 7 | 检索质量（查询构造、透明排序、上限语义、相关性校验） | ✅ 已完成 |
+| 8 | 配置项接回（8 组真实生效、默认值等于现状、每个键都被读取） | ✅ 已完成 |
 
 ### 🧪 开发
 
