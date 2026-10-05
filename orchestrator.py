@@ -100,8 +100,14 @@ class Orchestrator:
 
         self.state_manager = StateManager(self.projects_dir)
         self.artifact_store = ArtifactStore(self.projects_dir)
+        # 显式把运行根传给服务层：用户提供的 ``--data`` 相对**运行根**解析（而非
+        # 调用者进程 cwd）。这与 ``paths.projects_dir`` / ``paths.output_dir``
+        # 锚定同一根，是 Phase 8 双锚点原则在"用户数据路径"上的延伸。
         self.research_service = ResearchService(
-            self.projects_dir, self.state_manager, self.artifact_store
+            self.projects_dir,
+            self.state_manager,
+            self.artifact_store,
+            base_dir=self.base_dir,
         )
 
     def init_project(self, project_name: str, mode: WorkflowMode = "lightweight") -> Path:

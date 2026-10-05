@@ -28,6 +28,10 @@ from core.config_validation import (
 
 # A settings mapping shaped like the repository's config/settings.yaml, i.e. it
 # only contains keys that some code path actually reads.
+#
+# 注意：本 fixture 是"一个能通过校验的配置"的**样本**，其取值**不代表 shipped 默认值**
+# （例如 provider 的真实回退是 gemini、timeout 的 shipped 默认是 600）。
+# 校验测试只关心"形状是否合法"，不要把它当作默认值的第二来源。
 VALID_SETTINGS: dict = {
     "api_keys": {"pubmed_email": "", "semantic_scholar_key": "", "crossref_email": ""},
     "llm": {

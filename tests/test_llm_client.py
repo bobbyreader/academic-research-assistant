@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from core.llm_client import (
     CodexCLIClient,
@@ -509,3 +511,104 @@ def test_wrapper_over_openai_reports_real_usage() -> None:
     assert report.prompt_tokens == 10
     assert report.completion_tokens == 2
     assert report.total_tokens == 12
+
+
+# --------------------------------------------------------------------------- #
+# 跨来源一致性：LLMSettings.timeout 必须等于 config/settings.yaml 的
+# llm.timeout_seconds。这两处是**同一个旋钮的两个来源**：一旦不一致，用户
+# "删掉配置键"就会静默改变行为——这正是 Phase 8 发现的那类缺陷（DEFAULTS 声称
+# llm.provider 默认 codex_cli，而代码真实回退是 gemini）。本测试钉死这种漂移。
+# --------------------------------------------------------------------------- #
+def _yaml_timeout_seconds() -> int:
+    """从 config/settings.yaml 读取 llm.timeout_seconds 的原始值。"""
+    settings_path = Path(__file__).resolve().parent.parent / "config" / "settings.yaml"
+    data = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
+    return data["llm"]["timeout_seconds"]
+
+
+def test_llm_settings_timeout_matches_settings_yaml() -> None:
+    """LLMSettings.timeout 必须等于 config/settings.yaml 的 llm.timeout_seconds。
+
+    二者是同一个超时旋钮的两个来源（settings.yaml 由 ResearchService 原始 dict 读取、
+    LLMSettings 是代码内回退默认）。**它们不一致时，"删掉配置键"会静默改变行为**——
+    这类漂移必须让测试变红，而不能悄悄发生。
+    """
+    assert LLMSettings.timeout == _yaml_timeout_seconds()
+
+
+def test_build_llm_client_default_timeout_matches_settings_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未显式传 timeout 时，构建出的客户端必须取自与 settings.yaml 一致的默认值。
+
+    钉死三个 provider 分支共享的 ``timeout if timeout is not None else
+    LLMSettings.timeout`` 回退路径——任一分支若硬编码别的值，测试即失败。
+    """
+    for env_var in ("ARS_LLM_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(env_var, raising=False)
+    expected = _yaml_timeout_seconds()
+
+    for provider in ("openai_compatible", "gemini", "codex_cli"):
+        client = build_llm_client(
+            provider=provider, api_key="test-key", workspace_dir=tmp_path
+        )
+        assert client.settings.timeout == expected, provider
+
+
+# --------------------------------------------------------------------------- #
+# 超时错误消息：必须给出**配置的上限**与**实测耗时**（不得编造）
+# --------------------------------------------------------------------------- #
+def test_codex_cli_timeout_message_includes_configured_limit_and_elapsed(
+    tmp_path: Path,
+) -> None:
+    """超时消息必须含配置上限（取自 settings.timeout）与实测耗时。
+
+    用一个很小的假超时——**绝不让测试真的等 600 秒**。上限用远小于 600 的值，
+    以证明该数字确实来自 ``settings.timeout``（配置）而非写死的字面量。
+    """
+    def timeout_runner(
+        command: list[str], prompt: str, output_path: Path, timeout: int
+    ) -> str:
+        raise subprocess.TimeoutExpired(cmd=command, timeout=timeout)
+
+    client = CodexCLIClient(
+        LLMSettings("codex_cli", "", "", timeout=1),
+        workspace_dir=tmp_path,
+        executable="/usr/local/bin/codex",
+        runner=timeout_runner,
+    )
+
+    with pytest.raises(LLMClientError) as excinfo:
+        client.complete("system", "user")
+
+    message = str(excinfo.value)
+    # 上限取自配置（此处 1），不是写死 600。
+    assert "llm.timeout_seconds=1" in message
+    # 实测耗时出现在消息里（真实 time.monotonic 差值，格式如 "0.0 秒"）。
+    assert "秒" in message
+    assert "已等待" in message
+    # 不可只写"请稍后重试"——用户必须能据此判断该改什么。
+    assert "config/settings.yaml" in message
+
+
+def test_codex_cli_timeout_message_uses_actual_configured_value_not_literal(
+    tmp_path: Path,
+) -> None:
+    """换一个配置上限，消息里的上限随之改变——数字来自配置，不是硬编码。"""
+    def timeout_runner(
+        command: list[str], prompt: str, output_path: Path, timeout: int
+    ) -> str:
+        raise subprocess.TimeoutExpired(cmd=command, timeout=timeout)
+
+    client = CodexCLIClient(
+        LLMSettings("codex_cli", "", "", timeout=123),
+        workspace_dir=tmp_path,
+        executable="/usr/local/bin/codex",
+        runner=timeout_runner,
+    )
+
+    with pytest.raises(LLMClientError, match="llm.timeout_seconds=123"):
+        client.complete("system", "user")
+
+    # 超时链保持：from exc，且异常类型仍为可读的 LLMClientError（非崩溃）。
+    assert issubclass(LLMClientError, RuntimeError)

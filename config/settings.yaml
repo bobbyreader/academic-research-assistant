@@ -124,4 +124,10 @@ llm:
   provider: "codex_cli"  # codex_cli、gemini 或 openai_compatible
   model: ""  # 留空则使用本机 Codex CLI 的默认模型
   base_url: ""  # 留空则使用对应 provider 的默认地址
-  timeout_seconds: 120  # 单次 LLM 请求超时（秒）
+  timeout_seconds: 600  # 单次 LLM 请求超时（秒）。**这是与 core/llm_client.py 的
+                        # LLMSettings.timeout 同一个旋钮的两个来源，二者必须一致**
+                        # （由 tests/test_llm_client.py 的一致性测试钉死）。
+                        # 为什么是 600：Phase 9 的真实端到端运行中，长文写作阶段
+                        # （writing）实测 120s 不够（连续两次可复现：Run1 失败在 writing、
+                        # Run2 失败在 analysis）；上调到 600s 后 5 次调用全部成功
+                        # （最长一次输入 30817 + 输出 5292 tokens）。详见 ROADMAP Phase 9。

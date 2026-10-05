@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -65,7 +66,12 @@ class LLMSettings:
     api_key: str
     model: str
     base_url: str = "https://api.openai.com/v1"
-    timeout: int = 120
+    # 单次 LLM 请求超时（秒）。这是与 config/settings.yaml 的 ``llm.timeout_seconds``
+    # **同一个旋钮的两个来源：二者必须始终相等**（一致时"删掉配置键"才与显式配置等价）。
+    # 一旦不一致，"删掉配置键"会静默改变行为——这正是 Phase 8 发现的那类缺陷。默认值
+    # 为 600（而非 120）的原因见 settings.yaml 该行注释与 ROADMAP Phase 9：真实长文
+    # 生成实测 120s 不够、600s 可过。一致性由 tests/test_llm_client.py 钉死，防漂移。
+    timeout: int = 600
 
 
 class OpenAICompatibleClient:
@@ -239,6 +245,8 @@ class CodexCLIClient:
         command = self._command(output_path)
         prompt = self._prompt(system_prompt, user_prompt)
         stdout = ""
+        # 真实测量等待时长：只在超时分支用于错误消息。拿不到就不写数字，绝不估算。
+        started = time.monotonic()
         try:
             if self.runner is not None:
                 stdout = self.runner(
@@ -248,7 +256,8 @@ class CodexCLIClient:
                 stdout = self._run(command, prompt)
             content = output_path.read_text(encoding="utf-8").strip()
         except subprocess.TimeoutExpired as exc:
-            raise LLMClientError("Codex 生成超时，请稍后重试") from exc
+            elapsed = time.monotonic() - started
+            raise LLMClientError(self._timeout_message(elapsed)) from exc
         except OSError as exc:
             raise LLMClientError(f"无法启动 Codex CLI: {exc}") from exc
         finally:
@@ -262,6 +271,20 @@ class CodexCLIClient:
 
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
         return parse_json_response(self.complete(system_prompt, user_prompt))
+
+    def _timeout_message(self, elapsed_seconds: float) -> str:
+        """组装超时错误消息：**上限取自本次实际生效的配置**，耗时取自真实测量。
+
+        两个数字都不得编造：``limit`` 读 ``self.settings.timeout``（而非字面量），
+        ``elapsed`` 是 ``time.monotonic()`` 的真实差值。让用户能据此判断该改什么。
+        """
+        limit = self.settings.timeout
+        return (
+            f"Codex 生成超时：已等待 {elapsed_seconds:.1f} 秒"
+            f"（上限来自 llm.timeout_seconds={limit}）。"
+            "长文生成可能确实需要更久，可在 config/settings.yaml 提高该值；"
+            "若反复超时，请检查网络或模型可用性。"
+        )
 
     def _command(self, output_path: Path) -> list[str]:
         executable = self.executable

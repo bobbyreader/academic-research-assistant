@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from core.artifact_store import ArtifactStore
+from core.artifact_store import ArtifactStore, resolve_repo_path
 from core.config_loader import (
     get_bool,
     get_float,
@@ -43,10 +43,15 @@ class ResearchService:
         projects_dir: Path,
         state_manager: StateManager,
         artifact_store: ArtifactStore,
+        base_dir: Path | None = None,
     ) -> None:
         self.projects_dir = projects_dir
         self.state_manager = state_manager
         self.artifact_store = artifact_store
+        # 运行根：用户提供的路径（如 ``--data``）相对它解析，与 ``paths.projects_dir``
+        # / ``paths.output_dir`` 锚定同一根。未显式传入时回退 ``Path.cwd()``——这正是
+        # 引入本机制之前的隐式锚点，因此"从仓库根跑"这条既有路径逐字节不变。
+        self.base_dir = base_dir or Path.cwd()
 
     def run(
         self,
@@ -74,6 +79,20 @@ class ResearchService:
                 f"config/settings.yaml 配置无效，请修正后再运行：{details}"
             )
 
+        # ``--data`` 是**用户提供的数据文件**，与 ``paths.projects_dir`` /
+        # ``paths.output_dir`` 同属"工作区数据"，因此按**运行根**解析——而不是按
+        # 调用者的进程 cwd（那会让"从别的目录调用"找不到文件，见 ROADMAP Phase 9）。
+        #
+        # **只在此处解析一次**：``resolve_repo_path`` 是既有的**唯一入口**（相对→
+        # 相对运行根、绝对→原样），随后把**绝对路径**往下传给指纹与管线；消费点
+        # （``analyze_csv`` / ``build_figures`` / ``RunFingerprint``）不再各自解析，
+        # 从而消除"每个消费点各解析一次"带来的漂移。
+        resolved_data_path: Path | None = (
+            resolve_repo_path(self.base_dir, str(data_path))
+            if data_path is not None
+            else None
+        )
+
         state = self.state_manager.load(project_name)
         if state is None:
             raise FileNotFoundError(f"项目 '{project_name}' 不存在")
@@ -84,6 +103,8 @@ class ResearchService:
                 "pipeline": "external_api",
                 "sources": sources,
                 "max_results": max_results,
+                # 元数据如实记录**用户传入的原值**（相对就是相对），使"从仓库根跑"
+                # 的既有路径在 state.json 上逐字节不变；下游消费的是解析后的绝对路径。
                 "data_path": str(data_path) if data_path else None,
                 "llm_provider": provider,
                 "llm_model": model,
@@ -166,7 +187,10 @@ class ResearchService:
             topic=topic,
             sources=sources,
             max_results=max_results,
-            data_path=data_path,
+            # 用**解析后的绝对路径**：``data_name``（``path.name``）与
+            # ``data_sha256``（内容哈希）因此在相对/绝对两种写法下完全一致——
+            # 同一份文件不会因为写法不同而改变续跑判定。
+            data_path=resolved_data_path,
             reviewer_count=reviewer_count,
             figure_dpi=figure_dpi,
             search_year_range=search_year_range,
@@ -337,7 +361,9 @@ class ResearchService:
                     topic=topic,
                     sources=sources,
                     max_results=max_results,
-                    data_path=data_path,
+                    # 传**绝对路径**：管线内的 ``analyze_csv(config.data_path)`` /
+                    # ``build_figures(config.data_path, ...)`` 因此不再依赖进程 cwd。
+                    data_path=resolved_data_path,
                     # 显式传值给下游（既有模式）：字段名与 delivery-dev 冻结的一致。
                     writing_paper_type=writing_paper_type,
                     writing_language=writing_language,
